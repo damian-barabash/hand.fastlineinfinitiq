@@ -18,8 +18,9 @@ import {
   IcMoon,
   IcChevL,
   IcChevR,
-  IcLinkedIn,
+  IcGlobe,
 } from '../shared/Icons.jsx'
+import { SkelPage } from '../shared/Skeleton.jsx'
 
 const Dashboard = lazy(() => import('../pages/Dashboard.jsx'))
 const Search = lazy(() => import('../pages/Search.jsx'))
@@ -103,14 +104,13 @@ export default function Shell() {
             {open && (
               <span className="word">
                 {product.sense}<em>.</em>
-                <small>{product.name}</small>
               </span>
             )}
           </div>
           {open && (
             <div className="sb-ctx">
               <button onClick={() => nav('/', { state: { stage: 'product' } })} title="Zmień produkt">
-                <span className="mono" style={{ letterSpacing: '.08em' }}>PD</span> <b>{product.sense}</b>
+                <span className="mono" style={{ letterSpacing: '.08em' }}>PD</span> <b>{product.name}</b>
               </button>
               <button onClick={() => nav('/', { state: { stage: 'ws' } })} title="Zmień workspace">
                 <span className="mono" style={{ letterSpacing: '.08em' }}>WS</span> <b>{ws?.name}</b>
@@ -130,7 +130,7 @@ export default function Shell() {
           ))}
           <div className="sb-sep" />
           <NavLink to="/app/integrations" className={({ isActive }) => `sb-item ${isActive ? 'on' : ''}`} title="Integracje">
-            <IcLinkedIn />
+            <IcGlobe />
             {open && <span className="lbl">Integracje</span>}
           </NavLink>
           <NavLink to="/app/settings" className={({ isActive }) => `sb-item ${isActive ? 'on' : ''}`} title="Ustawienia">
@@ -160,7 +160,7 @@ export default function Shell() {
         </div>
       </aside>
       <main className="main">
-        <Suspense fallback={null}>
+        <Suspense fallback={<SkelPage stats={4} cards={2} />}>
           <Routes>
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="search" element={<Search />} />

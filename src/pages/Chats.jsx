@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { session, hand } from '../lib/api.js'
 import { IcChat, IcSend, IcRefresh, IcLinkedIn, IcMail } from '../shared/Icons.jsx'
+import { SkelList, SkelText } from '../shared/Skeleton.jsx'
 
 const CH_ICON = { linkedin: IcLinkedIn, email: IcMail }
 
@@ -80,7 +81,7 @@ export default function Chats() {
       <div className="chat-split">
         <div className="card chat-list">
           <input placeholder="Szukaj…" value={q} onChange={(e) => setQ(e.target.value)} style={{ marginBottom: 10 }} />
-          {leads === null && <p className="muted">Ładowanie…</p>}
+          {leads === null && <SkelList rows={4} />}
           {leads && !shown.length && <p className="muted">Nie ma jeszcze żadnej rozmowy.</p>}
           {shown.map((l) => (
             <button
@@ -118,7 +119,7 @@ export default function Chats() {
                 )}
               </div>
               <div className="chat-msgs">
-                {thread === null && <p className="muted">Ładowanie…</p>}
+                {thread === null && <SkelText lines={5} />}
                 {thread?.map((m) => {
                   const Ic = CH_ICON[m.channel] ?? IcChat
                   return (

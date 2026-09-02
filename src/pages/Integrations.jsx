@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { session, hand } from '../lib/api.js'
 import { IcLinkedIn, IcMap, IcGlobe, IcCheck, IcRefresh, IcMail, IcKey } from '../shared/Icons.jsx'
 import IntegrationsAdmin from '../shared/IntegrationsAdmin.jsx'
+import { SkelPage } from '../shared/Skeleton.jsx'
 
 const ADMIN_INTEGRATIONS = 'Panel admina → Integracje'
 
@@ -80,7 +81,7 @@ export default function Integrations() {
     }
   }
 
-  if (!cfg) return <p className="muted">Ładowanie…</p>
+  if (!cfg) return <SkelPage cards={2} />
 
   const rows = [
     {

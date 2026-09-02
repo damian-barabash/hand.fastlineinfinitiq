@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'react'
 import { session, hand } from '../lib/api.js'
 import { IcSearch, IcLinkedIn, IcMap, IcGlobe, IcCheck, IcRefresh, IcSpark } from '../shared/Icons.jsx'
+import { SkelPage } from '../shared/Skeleton.jsx'
 
 const SOURCES = [
   {
@@ -93,7 +94,7 @@ export default function Search() {
     }
   }
 
-  if (!cfg) return <p className="muted">Ładowanie…</p>
+  if (!cfg) return <SkelPage cards={2} />
   const src = SOURCES.find((s) => s.key === source)
 
   return (

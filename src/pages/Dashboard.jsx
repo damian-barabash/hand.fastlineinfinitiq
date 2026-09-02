@@ -15,6 +15,7 @@ import {
   IcPulse,
   IcSearch,
 } from '../shared/Icons.jsx'
+import { SkelPage } from '../shared/Skeleton.jsx'
 
 const dayKey = (iso) => (iso ? String(iso).slice(0, 10) : '')
 const fmtDay = (k) => `${k.slice(8, 10)}.${k.slice(5, 7)}`
@@ -111,7 +112,7 @@ export default function Dashboard() {
     }
   }, [data, days])
 
-  if (!data) return <p className="muted">Ładowanie…</p>
+  if (!data) return <SkelPage stats={8} cards={0} charts={4} />
 
   return (
     <>

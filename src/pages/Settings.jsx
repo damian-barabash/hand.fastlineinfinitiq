@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'react'
 import { session, hand } from '../lib/api.js'
 import { IcCheck, IcPlay, IcPause, IcSpark } from '../shared/Icons.jsx'
+import { SkelPage } from '../shared/Skeleton.jsx'
 
 const DAYS = [
   [1, 'Pn'],
@@ -40,7 +41,7 @@ export default function Settings() {
     }
   }
 
-  if (!cfg) return <p className="muted">Ładowanie…</p>
+  if (!cfg) return <SkelPage cards={2} />
   const lim = cfg.limits
   const tone = cfg.tone
   const setLim = (k, v) => setCfg({ ...cfg, limits: { ...lim, [k]: v } })

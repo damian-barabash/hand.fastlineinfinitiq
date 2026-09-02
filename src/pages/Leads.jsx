@@ -15,6 +15,7 @@ import {
   IcPhone,
   IcEye,
 } from '../shared/Icons.jsx'
+import { SkelCard } from '../shared/Skeleton.jsx'
 
 const SRC_ICON = { linkedin: IcLinkedIn, maps: IcMap, web: IcGlobe }
 const STATUS = {
@@ -137,7 +138,14 @@ export default function Leads() {
       </div>
 
       {err && <div className="note warn" style={{ marginBottom: 14 }}>{err}</div>}
-      {leads === null && <p className="muted">Ładowanie…</p>}
+      {leads === null && (
+        <div className="grid g2">
+          <SkelCard lines={3} />
+          <SkelCard lines={3} />
+          <SkelCard lines={3} />
+          <SkelCard lines={3} />
+        </div>
+      )}
       {leads && !shown.length && (
         <div className="empty">
           <p>Brak leadów w tym widoku.</p>
