@@ -1,0 +1,69 @@
+/* ── LeadEngine: tylko to, czego nie ma we wspólnym design systemie ─────────
+   Wszystko inne (typografia, karty, przyciski, wykresy) przychodzi z
+   fiq-shared/src/design.css i barwi się przez --product-accent. */
+
+/* rozmowy: lista po lewej, wątek po prawej — na wąskim ekranie jedno pod drugim */
+.chat-split {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+.chat-list {
+  max-height: calc(100vh - 210px);
+  overflow: auto;
+}
+.chat-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom-color: var(--line);
+  color: var(--text);
+  padding: 10px 8px;
+  cursor: pointer;
+  font: inherit;
+}
+.chat-item:hover {
+  background: var(--acid-soft);
+}
+.chat-item.on {
+  border-color: var(--acid-line);
+  background: var(--acid-soft);
+}
+.chat-thread {
+  display: flex;
+  flex-direction: column;
+  min-height: 420px;
+  max-height: calc(100vh - 210px);
+}
+.chat-thread .chat-msgs {
+  flex: 1;
+  overflow: auto;
+}
+/* wiersz integracji — ikona, opis, status po prawej */
+.int-row {
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+  align-items: center;
+}
+.int-row:first-child {
+  border-top: none;
+}
+/* suwak progu jakości w barwie produktu */
+input[type='range'] {
+  accent-color: var(--acid);
+  width: 100%;
+}
+@media (max-width: 860px) {
+  .chat-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .chat-list {
+    max-height: 260px;
+  }
+}
