@@ -3,7 +3,8 @@
 // z którego podłączonego konta LinkedIn agent szuka i pisze. Wybór ma admin.
 import { useEffect, useState } from 'react'
 import { session, hand } from '../lib/api.js'
-import { IcLinkedIn, IcMap, IcGlobe, IcCheck, IcRefresh, IcMail } from '../shared/Icons.jsx'
+import { IcLinkedIn, IcMap, IcGlobe, IcCheck, IcRefresh, IcMail, IcKey } from '../shared/Icons.jsx'
+import IntegrationsAdmin from '../shared/IntegrationsAdmin.jsx'
 
 const ADMIN_INTEGRATIONS = 'Panel admina → Integracje'
 
@@ -22,6 +23,21 @@ export default function Integrations() {
       setReady(d.integrations ?? {})
     })
   }, [proj.id])
+
+  // „gotowe" nie może znaczyć tylko „klucz jest wklejony" — pytamy dostawcę
+  async function recheck() {
+    setBusy('check')
+    setMsg(null)
+    try {
+      const d = await hand('integrations.check', { project_id: proj.id })
+      setReady(d.integrations ?? {})
+      setMsg({ ok: true, text: 'Sprawdzone przed chwilą.' })
+    } catch (e) {
+      setMsg({ ok: false, text: e.message })
+    } finally {
+      setBusy('')
+    }
+  }
 
   async function loadAccounts() {
     setBusy('acc')
@@ -94,31 +110,36 @@ export default function Integrations() {
       </div>
 
       <div className="card">
-        <b>Źródła leadów</b>
-        <div style={{ marginTop: 12 }}>
-          {rows.map((r) => (
-            <div className="row int-row" key={r.key}>
-              <r.icon style={{ width: 18, height: 18, color: ready[r.key] ? 'var(--acid)' : 'var(--dim2)' }} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <b>{r.label}</b>
-                <div className="muted" style={{ fontSize: 12.5 }}>{r.desc}</div>
-              </div>
-              {ready[r.key] ? (
-                <span className="badge ok">gotowe</span>
-              ) : (
-                <span className="row" style={{ gap: 8 }}>
-                  <span className="badge warn">nieskonfigurowane</span>
-                  {r.url && (
-                    <a className="link-dim mono" style={{ fontSize: 11 }} href={r.url} target="_blank" rel="noreferrer">
-                      gdzie to skonfigurować ↗
-                    </a>
-                  )}
-                </span>
-              )}
-            </div>
-          ))}
+        <div className="row">
+          <b>Źródła leadów</b>
+          <button className="btn sm right" onClick={recheck} disabled={busy === 'check'}>
+            <IcRefresh /> {busy === 'check' ? 'Sprawdzam…' : 'Sprawdź teraz'}
+          </button>
         </div>
-        {(!ready.linkedin || !ready.maps) && (
+        <div style={{ marginTop: 12 }}>
+          {rows.map((r) => {
+            const st = ready[r.key] ?? {}
+            return (
+              <div className="row int-row" key={r.key}>
+                <r.icon style={{ width: 18, height: 18, color: st.ok ? 'var(--acid)' : 'var(--dim2)' }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <b>{r.label}</b>
+                  <div className="muted" style={{ fontSize: 12.5 }}>{r.desc}</div>
+                  {!st.ok && st.reason && (
+                    <div style={{ fontSize: 12.5, marginTop: 4, color: 'var(--warn)' }}>
+                      {st.reason}{' '}
+                      <a className="link-dim" href={st.url || r.url} target="_blank" rel="noreferrer">
+                        włącz tutaj ↗
+                      </a>
+                    </div>
+                  )}
+                </div>
+                <span className={'badge ' + (st.ok ? 'ok' : 'warn')}>{st.ok ? 'gotowe' : 'nie działa'}</span>
+              </div>
+            )
+          })}
+        </div>
+        {(!ready.linkedin?.ok || !ready.maps?.ok) && (
           <div className="note warn" style={{ marginTop: 12 }}>
             Tokeny ustawia się raz dla całej platformy: <b>{ADMIN_INTEGRATIONS}</b>.
             {!isAdmin && ' Skontaktuj się z administratorem Fastline InfinitiQ.'}
@@ -132,7 +153,7 @@ export default function Integrations() {
           <IcLinkedIn style={{ width: 18, height: 18, color: 'var(--acid)' }} />
           <b>Konto LinkedIn tego projektu</b>
           {isAdmin && (
-            <button className="btn sm right" onClick={loadAccounts} disabled={busy === 'acc' || !ready.linkedin}>
+            <button className="btn sm right" onClick={loadAccounts} disabled={busy === 'acc' || !ready.linkedin?.ok}>
               <IcRefresh /> {busy === 'acc' ? 'Pobieram…' : 'Pobierz konta'}
             </button>
           )}
@@ -233,6 +254,26 @@ export default function Integrations() {
         <p className={msg.ok ? 'muted' : 'err'} style={{ marginTop: 12 }}>
           {msg.text}
         </p>
+      )}
+
+      {/* Klucze są wspólne dla całej platformy, więc edytuje je admin — ten sam
+          komponent stoi w panelu admina w każdej domenie. Tutaj jest pod ręką,
+          bo to jedyne miejsce, w którym widać, że źródło nie działa. */}
+      {isAdmin && (
+        <>
+          <div className="spacer" />
+          <div className="pagehead" style={{ marginBottom: 12 }}>
+            <div>
+              <div className="mono">
+                <IcKey style={{ width: 13, height: 13, marginRight: 6, verticalAlign: '-2px' }} />
+                strefa administratora
+              </div>
+              <h1 style={{ fontSize: 22 }}>Klucze platformy</h1>
+              <p className="sub">Model AI, Unipile i Google. Zapis od razu sprawdza, czy klucz naprawdę działa.</p>
+            </div>
+          </div>
+          <IntegrationsAdmin />
+        </>
       )}
     </>
   )

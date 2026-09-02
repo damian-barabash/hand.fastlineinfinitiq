@@ -160,7 +160,8 @@ function providerConfig(ai: AiCfg) {
   let baseUrl = (ai.base_url || Deno.env.get("BARABASH_AI_URL") || "").trim().replace(/\/+$/, "");
   if (baseUrl.endsWith("/chat/completions")) baseUrl = baseUrl.slice(0, -"/chat/completions".length);
   if (baseUrl && !baseUrl.endsWith("/v1")) baseUrl += "/v1";
-  const apiKey = Deno.env.get((ai.key_secret || "BRAIN_AI_KEY").trim()) || "";
+  // klucz wklejony w panelu ma pierwszeństwo nad sekretem Supabase
+  const apiKey = (ai.api_key || "").trim() || Deno.env.get((ai.key_secret || "BRAIN_AI_KEY").trim()) || "";
   return { baseUrl, apiKey, model: (ai.model || "").trim() || "qwen3.5:9b" };
 }
 
@@ -254,6 +255,97 @@ async function knowledge(projectId: string, cap = 6000) {
     );
   }
   return parts.join("\n").slice(0, cap);
+}
+
+// ── realny stan integracji ──────────────────────────────────────────────────
+// Sam fakt, że klucz jest wklejony, nic nie znaczy: klucz Google potrafi być
+// poprawny, a Places API wyłączone w projekcie — wtedy pierwsze wyszukiwanie
+// kończy się błędem, którego nikt się nie spodziewa. Dlatego pytamy dostawcę
+// naprawdę, a wynik trzymamy przez CHECK_TTL, żeby nie robić tego przy każdym
+// otwarciu ekranu.
+const CHECK_TTL_MS = 10 * 60_000;
+const PLACES_CONSOLE = "https://console.cloud.google.com/apis/library/places.googleapis.com";
+const UNIPILE_CONSOLE = "https://dashboard.unipile.com";
+
+type Status = { ok: boolean; reason?: string; url?: string; checked_at?: string };
+
+async function readStatus(key: string): Promise<Status | null> {
+  const { data } = await db.from("brain_settings").select("value").eq("key", `${key}_status`).maybeSingle();
+  const v = (data?.value ?? null) as Status | null;
+  if (!v?.checked_at) return null;
+  return Date.now() - new Date(v.checked_at).getTime() < CHECK_TTL_MS ? v : null;
+}
+
+async function writeStatus(key: string, st: Status) {
+  const value = { ...st, checked_at: new Date().toISOString() };
+  await db.from("brain_settings").upsert({ key: `${key}_status`, value, updated_at: new Date().toISOString() });
+  return value;
+}
+
+async function checkMaps(force = false): Promise<Status> {
+  const { token } = await integrationKey("maps", "GOOGLE_MAPS_KEY");
+  if (!token) return { ok: false, reason: "Brak klucza Google — wklej go w panelu admina (Integracje)", url: PLACES_CONSOLE };
+  if (!force) {
+    const cached = await readStatus("maps");
+    if (cached) return cached;
+  }
+  try {
+    const r = await fetch("https://places.googleapis.com/v1/places:searchText", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Goog-Api-Key": token, "X-Goog-FieldMask": "places.displayName" },
+      body: JSON.stringify({ textQuery: "warsztat Kraków", languageCode: "pl", maxResultCount: 1 }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) return await writeStatus("maps", { ok: true });
+    const msg = String(data?.error?.message ?? `HTTP ${r.status}`);
+    // najczęstszy przypadek: klucz działa, ale Places API (New) nie jest włączone
+    const url = String(data?.error?.details?.[0]?.metadata?.activationUrl ?? PLACES_CONSOLE);
+    const short = /has not been used|is disabled|SERVICE_DISABLED/i.test(msg)
+      ? "Places API (New) nie jest włączone w projekcie Google"
+      : msg.slice(0, 160);
+    return await writeStatus("maps", { ok: false, reason: short, url });
+  } catch (e) {
+    return { ok: false, reason: `Google nie odpowiada: ${String((e as Error).message ?? e).slice(0, 120)}`, url: PLACES_CONSOLE };
+  }
+}
+
+async function checkLinkedIn(force = false): Promise<Status> {
+  const { dsn, token, ready } = await unipile();
+  if (!ready) {
+    return {
+      ok: false,
+      reason: dsn ? "Brak tokenu Unipile — wklej go w panelu admina (Integracje)" : "Brak DSN i tokenu Unipile",
+      url: UNIPILE_CONSOLE,
+    };
+  }
+  if (!force) {
+    const cached = await readStatus("unipile");
+    if (cached) return cached;
+  }
+  try {
+    const r = await fetch(`https://${dsn}/api/v1/accounts`, {
+      headers: { "X-API-KEY": token, accept: "application/json" },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!r.ok) {
+      const body = (await r.text().catch(() => "")).slice(0, 160);
+      return await writeStatus("unipile", { ok: false, reason: `Unipile ${r.status}: ${body}`, url: UNIPILE_CONSOLE });
+    }
+    const data = await r.json().catch(() => ({}));
+    const n = ((data?.items ?? data?.accounts ?? []) as unknown[]).length;
+    return await writeStatus(
+      "unipile",
+      n ? { ok: true } : { ok: false, reason: "Token działa, ale nie ma podłączonego żadnego konta LinkedIn", url: UNIPILE_CONSOLE },
+    );
+  } catch (e) {
+    return { ok: false, reason: `Unipile nie odpowiada: ${String((e as Error).message ?? e).slice(0, 120)}`, url: UNIPILE_CONSOLE };
+  }
+}
+
+async function integrationsStatus(force = false) {
+  const [linkedin, maps] = await Promise.all([checkLinkedIn(force), checkMaps(force)]);
+  return { linkedin, maps, web: { ok: true } as Status };
 }
 
 // ── źródła leadów ───────────────────────────────────────────────────────────
@@ -871,12 +963,7 @@ serve(async (req) => {
         const cfg = mergeCfg(data?.config);
         // id konta LinkedIn to ustawienie administracyjne — klient go nie widzi
         if (!admin) cfg.unipile_account_id = cfg.unipile_account_id ? "(ustawione)" : "";
-        const uni = await unipile();
-        const { token: mapsKey } = await integrationKey("maps", "GOOGLE_MAPS_KEY");
-        return J({
-          config: cfg,
-          integrations: { linkedin: uni.ready, maps: !!mapsKey, web: true },
-        });
+        return J({ config: cfg, integrations: await integrationsStatus() });
       }
       case "config.set": {
         const pid = String(body.project_id ?? "");
@@ -1019,6 +1106,12 @@ serve(async (req) => {
             status: String((a.sources as Array<{ status?: string }> | undefined)?.[0]?.status ?? a.status ?? "ok"),
           })),
         });
+      }
+      // Wymuszone sprawdzenie integracji — przycisk „Sprawdź teraz" w panelu.
+      case "integrations.check": {
+        const pid = String(body.project_id ?? "");
+        await assertProject(user, pid);
+        return J({ integrations: await integrationsStatus(true) });
       }
       // Ręczne uruchomienie kolejki — do testów i „wyślij teraz".
       case "tick.now": {

@@ -37,6 +37,9 @@ export default function Shell() {
   const user = session.user
   const ws = session.ws
   const proj = session.proj
+  // Nazwa produktu pochodzi z rejestru platformy — panel nie może pokazywać
+  // samego „Hand", bo klient z kilkoma produktami widzi wszędzie to samo słowo.
+  const product = session.product ?? { sense: 'Hand', name: 'LeadEngine' }
 
   // Dostęp do produktu daje workspace klienta — stara sesja w localStorage nie
   // może wpuścić do LeadEngine kogoś, komu produkt odebrano.
@@ -99,16 +102,20 @@ export default function Shell() {
             <img className="mark-img" src="/favicon-192.png" alt="InfinitiQ" />
             {open && (
               <span className="word">
-                LeadEngine<em>.</em>
+                {product.sense}<em>.</em>
+                <small>{product.name}</small>
               </span>
             )}
           </div>
           {open && (
             <div className="sb-ctx">
-              <button onClick={() => nav('/')} title="Zmień produkt / workspace / projekt">
+              <button onClick={() => nav('/', { state: { stage: 'product' } })} title="Zmień produkt">
+                <span className="mono" style={{ letterSpacing: '.08em' }}>PD</span> <b>{product.sense}</b>
+              </button>
+              <button onClick={() => nav('/', { state: { stage: 'ws' } })} title="Zmień workspace">
                 <span className="mono" style={{ letterSpacing: '.08em' }}>WS</span> <b>{ws?.name}</b>
               </button>
-              <button onClick={() => nav('/', { state: { openWs: ws } })} title="Zmień projekt">
+              <button onClick={() => nav('/', { state: { stage: 'proj' } })} title="Zmień projekt">
                 <span className="mono" style={{ letterSpacing: '.08em' }}>PR</span> <b>{proj?.name}</b>
               </button>
             </div>

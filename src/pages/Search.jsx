@@ -52,7 +52,7 @@ export default function Search() {
     hand('config.get', { project_id: proj.id }).then((d) => {
       setCfg(d.config)
       setReady(d.integrations ?? {})
-      const first = SOURCES.find((s) => d.integrations?.[s.key])
+      const first = SOURCES.find((s) => d.integrations?.[s.key]?.ok)
       if (first) setSource(first.key)
     })
     loadRuns()
@@ -161,18 +161,16 @@ export default function Search() {
             ))}
           </div>
           <p className="muted" style={{ marginBottom: 10 }}>{src.hint}</p>
-          {ready[source] === false && (
+          {ready[source] && !ready[source].ok && (
             <div className="note warn" style={{ marginBottom: 12 }}>
-              Źródło <b>nieskonfigurowane</b>. {src.setup}
-              {src.setupUrl && (
-                <>
-                  {' — '}
-                  <a className="link-dim" href={src.setupUrl} target="_blank" rel="noreferrer">
-                    gdzie to skonfigurować ↗
-                  </a>
-                </>
-              )}
-              {!isAdmin && <div style={{ marginTop: 4 }}>Konfiguruje to administrator Fastline InfinitiQ.</div>}
+              Źródło <b>nie działa</b>: {ready[source].reason || 'nieskonfigurowane'}.{' '}
+              <a className="link-dim" href={ready[source].url || src.setupUrl} target="_blank" rel="noreferrer">
+                włącz tutaj ↗
+              </a>
+              <div style={{ marginTop: 4 }}>
+                {src.setup}
+                {!isAdmin && ' — konfiguruje to administrator Fastline InfinitiQ.'}
+              </div>
             </div>
           )}
           <label className="f">
@@ -188,7 +186,7 @@ export default function Search() {
             <span className="mono">Ile wyników (max 40)</span>
             <input type="number" min="5" max="40" value={limit} onChange={(e) => setLimit(+e.target.value)} />
           </label>
-          <button className="btn primary" onClick={run} disabled={busy === 'run' || ready[source] === false}>
+          <button className="btn primary" onClick={run} disabled={busy === 'run' || (ready[source] && !ready[source].ok)}>
             <IcSearch /> {busy === 'run' ? 'Szukam i oceniam…' : 'Szukaj'}
           </button>
           {msg && (
