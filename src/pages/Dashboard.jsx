@@ -1,4 +1,4 @@
-// Pulpit LeadEngine — co się dzieje w pozyskiwaniu leadów i ile to kosztuje.
+// Pulpit Lead Engine — co się dzieje w pozyskiwaniu leadów i ile to kosztuje.
 // Wszystkie liczby liczone są z surowych danych (hand.stats), nie z liczników,
 // więc nie da się ich rozjechać przez nieudany zapis.
 import { useMemo, useState } from 'react'

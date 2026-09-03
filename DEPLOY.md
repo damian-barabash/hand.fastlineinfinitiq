@@ -1,4 +1,4 @@
-# LeadEngine (Hand) — jak to wdrożyć i niczego nie zepsuć
+# Lead Engine (Hand) — jak to wdrożyć i niczego nie zepsuć
 
 Repozytorium: `hand.fastlineinfinitiq` → domena **hand.fastlineinfinitiq.pl** (GitHub Pages).
 Wszystko poniżej robisz raz. Potem każdy `git push` na `main` sam publikuje stronę.
@@ -10,7 +10,7 @@ Wszystko poniżej robisz raz. Potem każdy `git push` na `main` sam publikuje st
 ```bash
 cd "/Users/dmytrii/Desktop/PROJEKTY/FASTLINE INFINITIQ/Prod/hand.fastlineinfinitiq"
 git add -A
-git commit -m "LeadEngine: panel, silnik hand-api, integracje"
+git commit -m "Lead Engine: panel, silnik hand-api, integracje"
 git push -u origin main
 ```
 
@@ -59,7 +59,7 @@ W **Settings → Pages** po podpięciu zaznacz **Enforce HTTPS**.
 2. **Unipile** — załóż konto, podłącz tam konta LinkedIn, potem w panelu:
    *Admin → Integracje → Unipile* wklej **DSN** (np. `api8.unipile.com:13843`) i **token**.
    Kliknij *Zapisz i sprawdź* — pokaże listę kont.
-3. **Konto LinkedIn dla projektu** — w LeadEngine: *Integracje → Konto LinkedIn tego projektu*
+3. **Konto LinkedIn dla projektu** — w Lead Engine: *Integracje → Konto LinkedIn tego projektu*
    → *Pobierz konta* → *Użyj*. Widzi to tylko admin.
 4. **Autopilot** — *Ustawienia → Włącz autopilota*. Do tego czasu agent tylko szuka
    i pokazuje leady, sam nikogo nie zaczepia.

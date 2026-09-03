@@ -4,7 +4,7 @@ import SharedLogin from '../shared/Login.jsx'
 export default function Login() {
   return (
     <SharedLogin
-      product="LeadEngine"
+      product="Lead Engine"
       tagline="Autonomiczne pozyskiwanie leadów. Zaloguj się, aby kontynuować."
     />
   )

@@ -1,4 +1,4 @@
-// ── hand-api — silnik produktu LeadEngine (Hand) ─────────────────────────────
+// ── hand-api — silnik produktu Lead Engine (Hand) ─────────────────────────────
 // Odpowiada za wszystko, czego panel Hand nie może zrobić sam:
 //   • wyszukiwanie leadów (LinkedIn przez Unipile, Google Places, otwarty web)
 //   • kwalifikację leadów modelem (jedno wywołanie na partię, nie na lead)
@@ -93,7 +93,7 @@ async function assertProject(user: User, projectId: string) {
   const { data: link } = await db
     .from("fiq_workspace_products").select("product_key").eq("workspace_id", p.workspace_id).eq("product_key", PRODUCT)
     .maybeSingle();
-  if (!link) throw new Error("workspace nie ma dostępu do LeadEngine");
+  if (!link) throw new Error("workspace nie ma dostępu do Lead Engine");
   // przypisanie klienta do konkretnych projektów (puste = wszystkie w workspace)
   const { data: mine } = await db.from("brain_user_projects").select("project_id").eq("user_id", user.id);
   if (mine?.length && !mine.some((r: { project_id: string }) => r.project_id === projectId)) {
@@ -136,7 +136,7 @@ async function uniFetch(path: string, init: RequestInit = {}, timeout = 25_000) 
 }
 
 // ── dostawca AI (ten sam co w Brain: ustawienie ai_provider) ────────────────
-type AiCfg = { base_url?: string; model?: string; temperature?: number; max_tokens?: number; key_secret?: string };
+type AiCfg = { base_url?: string; model?: string; temperature?: number; max_tokens?: number; key_secret?: string; api_key?: string };
 
 // Ceny za 1M tokenów — do metryki „wydatki na model". Nieznany model liczymy
 // po najbliższej stawce DeepSeeka, żeby wykres nigdy nie był pusty.
