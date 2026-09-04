@@ -3,7 +3,7 @@
 // z którego podłączonego konta LinkedIn agent szuka i pisze. Wybór ma admin.
 import { useEffect, useState } from 'react'
 import { session, hand } from '../lib/api.js'
-import { IcLinkedIn, IcMap, IcGlobe, IcCheck, IcRefresh, IcMail, IcKey } from '../shared/Icons.jsx'
+import { IcLinkedIn, IcMap, IcGlobe, IcCheck, IcRefresh, IcMail, IcKey, IcCopy, IcTrash } from '../shared/Icons.jsx'
 import IntegrationsAdmin from '../shared/IntegrationsAdmin.jsx'
 import { SkelPage } from '../shared/Skeleton.jsx'
 
@@ -15,6 +15,12 @@ export default function Integrations() {
   const [cfg, setCfg] = useState(null)
   const [ready, setReady] = useState({})
   const [accounts, setAccounts] = useState(null)
+  const [link, setLink] = useState(null)   // zaproszenie dla klienta (tylko admin)
+  const [copied, setCopied] = useState(false)
+  // „nie działa" przy LinkedInie zwykle znaczy „token jest, ale nie ma jeszcze kont" —
+  // czyli dokładnie sytuację, w której link zapraszający jest potrzebny. Blokujemy
+  // generowanie tylko wtedy, gdy naprawdę brakuje DSN/tokenu.
+  const uniKeyMissing = !!ready.linkedin && !ready.linkedin.ok && /brak/i.test(ready.linkedin.reason || '')
   const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState(null)
 
@@ -24,6 +30,50 @@ export default function Integrations() {
       setReady(d.integrations ?? {})
     })
   }, [proj.id])
+
+  useEffect(() => {
+    if (!isAdmin) return
+    hand('connect.get', { project_id: proj.id }).then(setLink).catch(() => {})
+  }, [proj.id, isAdmin])
+
+  // Link zapraszający: klient podłącza LinkedIn sam, u Unipile, bez podawania nam hasła.
+  async function makeLink(kind) {
+    setBusy('link')
+    setMsg(null)
+    try {
+      await hand('connect.create', { project_id: proj.id, kind })
+      setLink(await hand('connect.get', { project_id: proj.id }))
+      setCopied(false)
+      setMsg({ ok: true, text: 'Link gotowy — wyślij go klientowi.' })
+    } catch (e) {
+      setMsg({ ok: false, text: e.message })
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function revokeLink() {
+    if (!window.confirm('Unieważnić link? Klient nie podłączy się nim ponownie.')) return
+    setBusy('link')
+    try {
+      await hand('connect.revoke', { project_id: proj.id })
+      setLink(await hand('connect.get', { project_id: proj.id }))
+    } catch (e) {
+      setMsg({ ok: false, text: e.message })
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(link.url)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      setMsg({ ok: false, text: 'Skopiuj adres ręcznie — przeglądarka nie dała dostępu do schowka.' })
+    }
+  }
 
   // „gotowe" nie może znaczyć tylko „klucz jest wklejony" — pytamy dostawcę
   async function recheck() {
@@ -147,6 +197,72 @@ export default function Integrations() {
           </div>
         )}
       </div>
+
+      {isAdmin && (
+        <>
+          <div className="spacer" />
+          <div className="card">
+            <div className="row" style={{ marginBottom: 10 }}>
+              <IcLinkedIn style={{ width: 18, height: 18, color: 'var(--acid)' }} />
+              <b>Zaproszenie dla klienta</b>
+              {link?.state === 'connected' && (
+                <span className="badge acid right">
+                  <IcCheck style={{ width: 11, height: 11 }} /> podłączone
+                </span>
+              )}
+            </div>
+            <p className="muted" style={{ marginBottom: 12 }}>
+              Wyślij klientowi jeden link. Zaloguje się do LinkedIna na stronie Unipile (hasła nie widzimy
+              ani my, ani panel), a konto <b>samo przypisze się do tego projektu</b> — bez ręcznego wybierania.
+            </p>
+
+            {link?.state === 'connected' ? (
+              <>
+                <div className="note" style={{ marginBottom: 12 }}>
+                  Konto <b>{link.account_name || link.account_id}</b> podłączone
+                  {link.connected_at ? ` ${new Date(link.connected_at).toLocaleString('pl-PL')}` : ''}.
+                </div>
+                <div className="row" style={{ gap: 8 }}>
+                  <button className="btn sm" onClick={() => makeLink('reconnect')} disabled={busy === 'link'}>
+                    <IcRefresh /> Link do ponownego podłączenia
+                  </button>
+                  <button className="btn sm" onClick={() => makeLink('create')} disabled={busy === 'link'}>
+                    Nowy link (inne konto)
+                  </button>
+                </div>
+              </>
+            ) : link?.state === 'waiting' ? (
+              <>
+                <div className="codebox" style={{ marginBottom: 10 }}>
+                  <button className="btn sm copy" onClick={copyLink}>
+                    <IcCopy /> {copied ? 'Skopiowano' : 'Kopiuj'}
+                  </button>
+                  <code>{link.url}</code>
+                </div>
+                <div className="row" style={{ gap: 8 }}>
+                  <a className="btn sm" href={link.url} target="_blank" rel="noreferrer">Otwórz</a>
+                  <button className="btn sm danger" onClick={revokeLink} disabled={busy === 'link'}>
+                    <IcTrash /> Unieważnij
+                  </button>
+                  <span className="mono right" style={{ fontSize: 10.5, color: 'var(--dim2)' }}>
+                    otwarć: {link.opens ?? 0}
+                    {link.expires_at ? ` · ważny do ${new Date(link.expires_at).toLocaleDateString('pl-PL')}` : ''}
+                  </span>
+                </div>
+              </>
+            ) : (
+              <button className="btn primary" onClick={() => makeLink('create')} disabled={busy === 'link' || uniKeyMissing}>
+                <IcLinkedIn style={{ width: 15, height: 15 }} /> {busy === 'link' ? 'Generuję…' : 'Wygeneruj link dla klienta'}
+              </button>
+            )}
+            {uniKeyMissing && (
+              <p className="muted" style={{ marginTop: 10 }}>
+                Najpierw wklej DSN i token Unipile w {ADMIN_INTEGRATIONS} — bez nich kreator się nie otworzy.
+              </p>
+            )}
+          </div>
+        </>
+      )}
 
       <div className="spacer" />
       <div className="card">
