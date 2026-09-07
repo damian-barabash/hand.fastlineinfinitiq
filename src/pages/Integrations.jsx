@@ -3,8 +3,7 @@
 // z którego podłączonego konta LinkedIn agent szuka i pisze. Wybór ma admin.
 import { useEffect, useState } from 'react'
 import { session, hand } from '../lib/api.js'
-import { IcLinkedIn, IcMap, IcGlobe, IcCheck, IcRefresh, IcMail, IcKey, IcCopy, IcTrash } from '../shared/Icons.jsx'
-import IntegrationsAdmin from '../shared/IntegrationsAdmin.jsx'
+import { IcLinkedIn, IcMap, IcGlobe, IcCheck, IcRefresh, IcMail, IcCopy, IcTrash } from '../shared/Icons.jsx'
 import { SkelPage } from '../shared/Skeleton.jsx'
 
 const ADMIN_INTEGRATIONS = 'Panel admina → Integracje'
@@ -373,24 +372,13 @@ export default function Integrations() {
         </p>
       )}
 
-      {/* Klucze są wspólne dla całej platformy, więc edytuje je admin — ten sam
-          komponent stoi w panelu admina w każdej domenie. Tutaj jest pod ręką,
-          bo to jedyne miejsce, w którym widać, że źródło nie działa. */}
+      {/* Klucze wspólne platformy (model AI, Unipile, Google Places) stoją WYŁĄCZNIE
+          w panelu admina — tutaj byłyby drugą kopią tego samego formularza. */}
       {isAdmin && (
-        <>
-          <div className="spacer" />
-          <div className="pagehead" style={{ marginBottom: 12 }}>
-            <div>
-              <div className="mono">
-                <IcKey style={{ width: 13, height: 13, marginRight: 6, verticalAlign: '-2px' }} />
-                strefa administratora
-              </div>
-              <h1 style={{ fontSize: 22 }}>Klucze platformy</h1>
-              <p className="sub">Model AI, Unipile i Google. Zapis od razu sprawdza, czy klucz naprawdę działa.</p>
-            </div>
-          </div>
-          <IntegrationsAdmin />
-        </>
+        <p className="note" style={{ marginTop: 18 }}>
+          Klucze wspólne dla całej platformy — model AI, token Unipile i klucz Google —
+          ustawiasz raz w <b>{ADMIN_INTEGRATIONS}</b>.
+        </p>
       )}
     </>
   )
