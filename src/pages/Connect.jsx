@@ -77,7 +77,7 @@ export default function Connect() {
 
         <div className="mono">
           <span className="dot" style={{ marginRight: 8 }} />
-          Fastline InfinitiQ // Lead Engine
+          Fastline InfinitiQ // AI Łowca Leadów
         </div>
 
         {info === null && <p className="sub" style={{ marginTop: 18 }}>Sprawdzam link…</p>}
@@ -115,7 +115,7 @@ export default function Connect() {
             <p className="sub">
               {info.kind === 'reconnect'
                 ? 'LinkedIn poprosił o ponowne zalogowanie. Jedno kliknięcie i agent wraca do pracy.'
-                : 'Dzięki temu agent Lead Engine może wyszukiwać właściwych ludzi, wysyłać zaproszenia i prowadzić rozmowy w Twoim imieniu.'}
+                : 'Dzięki temu agent AI Łowca Leadów może wyszukiwać właściwych ludzi, wysyłać zaproszenia i prowadzić rozmowy w Twoim imieniu.'}
               {info.project ? ` Projekt: ${info.project}.` : ''}
             </p>
 

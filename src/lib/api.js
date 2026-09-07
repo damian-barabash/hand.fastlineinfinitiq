@@ -1,4 +1,4 @@
-// Klient panelu Lead Engine.
+// Klient panelu AI Łowca Leadów.
 //   • platforma (sesja, logowanie, workspace'y, projekty, baza wiedzy, admin)
 //     idzie do brain-admin przez wspólny moduł fiq-shared,
 //   • wszystko, co Handowe (szukanie, leady, rozmowy, statystyki), idzie do hand-api.

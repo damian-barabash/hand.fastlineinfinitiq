@@ -1,4 +1,4 @@
-// Layout panelu Lead Engine — układ identyczny jak w Brain (jeden design system),
+// Layout panelu AI Łowca Leadów — układ identyczny jak w Brain (jeden design system),
 // zmienia się tylko akcent, nazwa i zestaw sekcji.
 import { Routes, Route, NavLink, Navigate, useNavigate } from 'react-router-dom'
 import { lazy, Suspense, useEffect, useState } from 'react'
@@ -40,10 +40,10 @@ export default function Shell() {
   const proj = session.proj
   // Nazwa produktu pochodzi z rejestru platformy — panel nie może pokazywać
   // samego „Hand", bo klient z kilkoma produktami widzi wszędzie to samo słowo.
-  const product = session.product ?? { sense: 'Hand', name: 'Lead Engine' }
+  const product = session.product ?? { sense: 'Hand', name: 'AI Łowca Leadów' }
 
   // Dostęp do produktu daje workspace klienta — stara sesja w localStorage nie
-  // może wpuścić do Lead Engine kogoś, komu produkt odebrano.
+  // może wpuścić do AI Łowca Leadów kogoś, komu produkt odebrano.
   useEffect(() => {
     let alive = true
     ensureProductAccess('hand')
