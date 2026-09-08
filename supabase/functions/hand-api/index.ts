@@ -703,12 +703,25 @@ async function sendLinkedIn(cfg: Cfg, lead: Record<string, unknown>, text: strin
   return { channel: "linkedin", provider_msg_id: String(res?.id ?? ""), status: "sent" as const };
 }
 
-// Mail idzie przez Resend skonfigurowany w projekcie (ten sam klucz co sprzedawca Brain).
-async function sendEmail(projectId: string, cfg: Cfg, lead: Record<string, unknown>, text: string) {
+// Wspólny kanał e-mail PROJEKTU (`fiq_project_integrations`, kind='email') — ten sam,
+// który ustawia się w dowolnym produkcie. Stary układ (konfiguracja w sprzedawcy Brain)
+// zostaje jako fallback dla projektów sprzed migracji.
+async function projectEmail(projectId: string) {
+  const { data } = await db
+    .from("fiq_project_integrations").select("config").eq("project_id", projectId).eq("kind", "email").maybeSingle();
+  const shared = (data?.config ?? {}) as Record<string, string>;
+  if (shared.resend_key) return shared;
   const { data: sales } = await db.from("brain_sales").select("config").eq("project_id", projectId).maybeSingle();
-  const key = String(((sales?.config ?? {}) as Record<string, Record<string, string>>)?.email?.resend_key ?? "");
-  const from = String(cfg.email.from || ((sales?.config ?? {}) as Record<string, Record<string, string>>)?.email?.from || "");
-  if (!key || !from) throw new Error("kanał e-mail nieskonfigurowany (klucz Resend i adres nadawcy w Brain → Sprzedawca)");
+  const legacy = ((sales?.config ?? {}) as Record<string, Record<string, string>>)?.email ?? {};
+  return legacy as Record<string, string>;
+}
+
+async function sendEmail(projectId: string, cfg: Cfg, lead: Record<string, unknown>, text: string) {
+  const mail = await projectEmail(projectId);
+  const key = String(mail.resend_key ?? "");
+  const sender = mail.from_name && mail.from_email ? `${mail.from_name} <${mail.from_email}>` : String(mail.from_email ?? mail.from ?? "");
+  const from = String(cfg.email.from || sender || "");
+  if (!key || !from) throw new Error("kanał e-mail nieskonfigurowany — uzupełnij klucz Resend i adres nadawcy w Integracjach");
   const to = String(lead.email ?? "");
   if (!to) throw new Error("lead nie ma adresu e-mail");
   const r = await fetch("https://api.resend.com/emails", {

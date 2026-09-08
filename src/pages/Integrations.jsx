@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { session, hand } from '../lib/api.js'
 import { IcLinkedIn, IcMap, IcGlobe, IcCheck, IcRefresh, IcMail, IcCopy, IcTrash } from '../shared/Icons.jsx'
 import { SkelPage } from '../shared/Skeleton.jsx'
+import ProjectEmail from '../shared/ProjectEmail.jsx'
 
 const ADMIN_INTEGRATIONS = 'Panel admina → Integracje'
 
@@ -331,9 +332,14 @@ export default function Integrations() {
           <b>E-mail do leadów bez LinkedIna</b>
         </div>
         <p className="muted" style={{ marginBottom: 12 }}>
-          Firmy z Google Maps i z weba nie mają profilu LinkedIn — do nich agent pisze mailem. Klucz Resend
-          i adres nadawcy bierzemy z ustawień sprzedawcy w Brain (ten sam projekt), żeby nie duplikować konfiguracji.
+          Firmy z Google Maps i z weba nie mają profilu LinkedIn — do nich agent pisze mailem.
+          Skrzynkę podłączasz <b>tutaj</b>; to samo ustawienie działa w pozostałych produktach
+          tego projektu (i odwrotnie — wpisane gdzie indziej zadziała tu).
         </p>
+
+        <ProjectEmail projectId={proj.id} note="Adres, z którego pisze AI Łowca Leadów." />
+
+        <div className="spacer" />
         <label className="f" style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
           <input
             type="checkbox"
@@ -345,7 +351,7 @@ export default function Integrations() {
         </label>
         <div className="fgrid">
           <label className="f">
-            <span className="mono">Nadawca (puste = z Brain)</span>
+            <span className="mono">Nadawca (puste = wspólny adres projektu)</span>
             <input
               value={cfg.email.from}
               onChange={(e) => setCfg({ ...cfg, email: { ...cfg.email, from: e.target.value } })}
