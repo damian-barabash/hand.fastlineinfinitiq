@@ -69,6 +69,22 @@ function mergeCfg(stored: unknown): Cfg {
   return out as Cfg;
 }
 
+// Konto LinkedIn projektu: najpierw wybór admina w hand_config, a gdy go nie ma —
+// konto podłączone przez klienta linkiem (fiq_project_accounts, wspólne dla produktów;
+// link generuje się w Integracjach, obsługuje go brain-admin + brain-hook).
+async function withLinkedIn(projectId: string, cfg: Cfg): Promise<Cfg> {
+  if (!cfg.unipile_account_id) {
+    const { data } = await db.from("fiq_project_accounts").select("account_id").eq("project_id", projectId)
+      .eq("provider", "LINKEDIN").eq("status", "OK").order("connected_at", { ascending: false }).limit(1);
+    if (data?.[0]?.account_id) cfg.unipile_account_id = String(data[0].account_id);
+  }
+  return cfg;
+}
+async function loadCfg(projectId: string): Promise<Cfg> {
+  const { data } = await db.from("hand_config").select("config").eq("project_id", projectId).maybeSingle();
+  return await withLinkedIn(projectId, mergeCfg(data?.config));
+}
+
 // ── autoryzacja ─────────────────────────────────────────────────────────────
 type User = { id: string; role: string; workspace_id: string | null };
 
@@ -748,7 +764,7 @@ async function deliver(projectId: string, cfg: Cfg, lead: Record<string, unknown
 
 // ── uruchomienie wyszukiwania ───────────────────────────────────────────────
 async function runSearch(projectId: string, source: string, query: string, limit: number) {
-  const cfg = mergeCfg((await db.from("hand_config").select("config").eq("project_id", projectId).maybeSingle()).data?.config);
+  const cfg = await loadCfg(projectId);
   const { data: run } = await db
     .from("hand_runs").insert({ project_id: projectId, source, query, status: "running" }).select("id").single();
   const runId = run!.id as string;
@@ -836,8 +852,8 @@ async function tick() {
   const deadline = Date.now() + 100_000; // zostawiamy zapas do 150 s izolatu
   for (const row of cfgs ?? []) {
     if (Date.now() > deadline) break;
-    const cfg = mergeCfg(row.config);
     const pid = row.project_id as string;
+    const cfg = await withLinkedIn(pid, mergeCfg(row.config));
     if (!cfg.autopilot || !inWorkHours(cfg)) continue;
     const outToday = await sentToday(pid);
     const left = Math.min(cfg.limits.messages_per_day - outToday, 4); // max 4 na tick — rozkłada wysyłkę w czasie
@@ -915,9 +931,7 @@ async function handleInbound(payload: Record<string, unknown>) {
     updated_at: new Date().toISOString(),
   }).eq("id", lead.id);
 
-  const cfg = mergeCfg(
-    (await db.from("hand_config").select("config").eq("project_id", lead.project_id).maybeSingle()).data?.config,
-  );
+  const cfg = await loadCfg(lead.project_id);
   const { data: history } = await db
     .from("hand_messages").select("direction, content").eq("lead_id", lead.id).order("id").limit(20);
   const kb = await knowledge(lead.project_id, 4000);
@@ -952,104 +966,6 @@ async function handleInbound(payload: Record<string, unknown>) {
 }
 
 
-// ── zaproszenie do podłączenia LinkedIn (Hosted Auth Unipile) ───────────────
-// Klient nie podaje nam hasła: admin generuje link, klient go otwiera, a dane
-// logowania wpisuje już na stronie Unipile (2FA i potwierdzenie w aplikacji
-// obsługuje ich kreator). Po udanym podłączeniu Unipile woła nasz `notify_url`
-// z `{status, account_id, name}` — `name` to nasz token, po nim wiążemy konto
-// z projektem. Sam link Unipile żyje krótko (najdalej do ich dobowego restartu),
-// dlatego klientowi dajemy WŁASNY, stały adres `/connect?t=…`, a link Unipile
-// wypuszczamy dopiero w chwili kliknięcia.
-const PANEL_URL = (Deno.env.get("HAND_PANEL_URL") ?? "https://hand.fastlineinfinitiq.pl").replace(/\/+$/, "");
-const LINK_TTL_DAYS = 30;
-
-type ConnectLink = {
-  token: string; project_id: string; kind: string; reconnect_account: string | null;
-  expires_at: string | null; revoked_at: string | null; connected_at: string | null;
-  account_id: string | null; account_name: string | null; opens: number; created_at: string;
-};
-
-const newToken = () =>
-  [...crypto.getRandomValues(new Uint8Array(24))].map((b) => b.toString(16).padStart(2, "0")).join("");
-
-const connectUrl = (token: string) => `${PANEL_URL}/connect?t=${token}`;
-
-function linkState(l: ConnectLink | null): string {
-  if (!l) return "none";
-  if (l.connected_at) return "connected";
-  if (l.revoked_at) return "revoked";
-  if (l.expires_at && new Date(l.expires_at) < new Date()) return "expired";
-  return "waiting";
-}
-
-async function currentLink(projectId: string): Promise<ConnectLink | null> {
-  const { data } = await db.from("hand_connect_links").select("*")
-    .eq("project_id", projectId).order("created_at", { ascending: false }).limit(1).maybeSingle();
-  return (data ?? null) as ConnectLink | null;
-}
-
-/** Nazwa konta w Unipile — pokazujemy ją zamiast samego id, żeby było widać CZYJ to LinkedIn. */
-async function accountName(id: string): Promise<string> {
-  if (!id) return "";
-  try {
-    const a = await uniFetch(`/accounts/${encodeURIComponent(id)}`, {}, 12_000);
-    return String(a?.name ?? a?.username ?? "");
-  } catch {
-    return "";
-  }
-}
-
-/** Świeży link kreatora Unipile — ważny 2 h i jednorazowy. */
-async function hostedAuthUrl(link: ConnectLink): Promise<string> {
-  const { dsn } = await unipile();
-  const key = Deno.env.get("HAND_CRON_KEY") ?? "";
-  const notify = `${Deno.env.get("SUPABASE_URL")}/functions/v1/hand-api?hook=unipile&key=${encodeURIComponent(key)}`;
-  const payload: Record<string, unknown> = {
-    type: link.kind === "reconnect" ? "reconnect" : "create",
-    api_url: `https://${dsn}`,
-    expiresOn: new Date(Date.now() + 2 * 3600_000).toISOString(),
-    name: link.token,
-    notify_url: notify,
-    success_redirect_url: `${connectUrl(link.token)}&ok=1`,
-    failure_redirect_url: `${connectUrl(link.token)}&fail=1`,
-    single_use: true,
-  };
-  if (link.kind === "reconnect") payload.reconnect_account = link.reconnect_account;
-  else payload.providers = ["LINKEDIN"];
-  const data = await uniFetch("/hosted/accounts/link", { method: "POST", body: JSON.stringify(payload) }, 20_000);
-  const url = String(data?.url ?? "");
-  if (!url) throw new Error("Unipile nie zwrócił adresu kreatora");
-  return url;
-}
-
-/** Webhook Unipile: konto podłączone → wpisujemy je projektowi. Bez ręcznego wyboru. */
-async function handleUnipileHook(payload: Record<string, unknown>) {
-  const status = String(payload.status ?? "").toUpperCase();
-  const token = String(payload.name ?? "");
-  const accountId = String(payload.account_id ?? "");
-  console.log("unipile hook", status, token.slice(0, 8), accountId);
-  if (!token || !accountId) return J({ ok: true, ignored: "brak name/account_id" });
-  const { data } = await db.from("hand_connect_links").select("*").eq("token", token).maybeSingle();
-  const link = (data ?? null) as ConnectLink | null;
-  if (!link) return J({ ok: true, ignored: "nieznany token" });
-  if (!/SUCCESS|RECONNECT|CREATED/.test(status)) {
-    return J({ ok: true, ignored: `status ${status}` });
-  }
-  const name = await accountName(accountId);
-  const { data: row } = await db.from("hand_config").select("config").eq("project_id", link.project_id).maybeSingle();
-  const cfg = mergeCfg(row?.config);
-  cfg.unipile_account_id = accountId;
-  await db.from("hand_config").upsert({ project_id: link.project_id, config: cfg, updated_at: new Date().toISOString() });
-  await db.from("hand_connect_links").update({
-    connected_at: new Date().toISOString(), account_id: accountId, account_name: name,
-    updated_at: new Date().toISOString(),
-  }).eq("token", token);
-  // konto się pojawiło — stary werdykt „token działa, ale nie ma kont" jest nieaktualny
-  await db.from("brain_settings").delete().eq("key", "unipile_status");
-  console.log("konto podłączone do projektu", link.project_id, accountId, name);
-  return J({ ok: true, connected: true });
-}
-
 // ── HTTP ────────────────────────────────────────────────────────────────────
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
@@ -1062,52 +978,6 @@ serve(async (req) => {
   if (isCron && action === "tick") return await tick();
   if (isCron && action === "webhook") return await handleInbound((body.payload ?? body) as Record<string, unknown>);
 
-  // Unipile nie umie wysłać własnego nagłówka, więc klucz jedzie w query.
-  // Sprawdzamy go PRZED bramką logowania — inaczej webhook dostaje „Wymagane logowanie".
-  const q = new URL(req.url).searchParams;
-  if (q.get("hook") === "unipile") {
-    const ok = !!q.get("key") && q.get("key") === (Deno.env.get("HAND_CRON_KEY") ?? "___");
-    if (!ok) return J({ error: "forbidden" }, 403);
-    return await handleUnipileHook(body);
-  }
-
-  // Strona /connect?t=… jest publiczna: klient nie ma konta w panelu.
-  if (action === "connect.info" || action === "connect.start") {
-    const token = String(body.t ?? "");
-    const { data } = await db.from("hand_connect_links").select("*").eq("token", token).maybeSingle();
-    const link = (data ?? null) as ConnectLink | null;
-    const state = linkState(link);
-    if (!link || state === "revoked" || state === "expired") {
-      return J({ ok: false, state: link ? state : "none" }, 200);
-    }
-    const { data: proj } = await db.from("brain_projects").select("name, workspace_id").eq("id", link.project_id).maybeSingle();
-    const { data: ws } = proj
-      ? await db.from("brain_workspaces").select("name").eq("id", proj.workspace_id).maybeSingle()
-      : { data: null };
-    const info = {
-      ok: true, state, kind: link.kind,
-      project: String(proj?.name ?? ""), workspace: String(ws?.name ?? ""),
-      account_name: link.account_name ?? "",
-    };
-    if (action === "connect.info") return J(info);
-    if (state === "connected") return J({ ...info, already: true });
-    // link jest z definicji do wysłania dalej — jedna zapora na wypadek bota,
-    // który by w kółko generował kreatory u Unipile
-    if ((link.opens ?? 0) > 50) return J({ ok: false, state: "revoked" });
-    try {
-      const url = await hostedAuthUrl(link);
-      await db.from("hand_connect_links").update({
-        opens: (link.opens ?? 0) + 1, last_open_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }).eq("token", token);
-      return J({ ...info, url });
-    } catch (e) {
-      const msg = String((e as Error).message ?? e);
-      console.error("hosted auth:", msg.slice(0, 200));
-      return J({ ok: false, state, error: msg.slice(0, 200) }, 200);
-    }
-  }
-
   const user = await authUser(String(body.token ?? ""));
   if (!user) return J({ error: "Wymagane logowanie" }, 401);
   const admin = user.role === "admin";
@@ -1118,7 +988,7 @@ serve(async (req) => {
         const pid = String(body.project_id ?? "");
         await assertProject(user, pid);
         const { data } = await db.from("hand_config").select("config").eq("project_id", pid).maybeSingle();
-        const cfg = mergeCfg(data?.config);
+        const cfg = await withLinkedIn(pid, mergeCfg(data?.config));
         // id konta LinkedIn to ustawienie administracyjne — klient go nie widzi
         if (!admin) cfg.unipile_account_id = cfg.unipile_account_id ? "(ustawione)" : "";
         return J({ config: cfg, integrations: await integrationsStatus() });
@@ -1189,9 +1059,7 @@ serve(async (req) => {
         const { data: lead } = await db.from("hand_leads").select("*").eq("id", id).maybeSingle();
         if (!lead) return J({ error: "nie znaleziono" }, 404);
         await assertProject(user, lead.project_id);
-        const cfg = mergeCfg(
-          (await db.from("hand_config").select("config").eq("project_id", lead.project_id).maybeSingle()).data?.config,
-        );
+        const cfg = await loadCfg(lead.project_id);
         const text = await draftMessage(lead.project_id, cfg, await knowledge(lead.project_id), lead);
         if (!text) return J({ error: "Model nie odpowiedział — sprawdź dostawcę AI w panelu admina" }, 502);
         return J({ text });
@@ -1201,9 +1069,7 @@ serve(async (req) => {
         const { data: lead } = await db.from("hand_leads").select("*").eq("id", id).maybeSingle();
         if (!lead) return J({ error: "nie znaleziono" }, 404);
         await assertProject(user, lead.project_id);
-        const cfg = mergeCfg(
-          (await db.from("hand_config").select("config").eq("project_id", lead.project_id).maybeSingle()).data?.config,
-        );
+        const cfg = await loadCfg(lead.project_id);
         const text = String(body.content ?? "").trim() ||
           (await draftMessage(lead.project_id, cfg, await knowledge(lead.project_id), lead)) || "";
         if (!text) return J({ error: "Brak treści do wysłania" }, 400);
@@ -1250,56 +1116,6 @@ serve(async (req) => {
           runs: runs.data ?? [],
           days,
         });
-      }
-      // Link zapraszający klienta do podłączenia LinkedIn (kreator Unipile).
-      case "connect.get": {
-        const pid = String(body.project_id ?? "");
-        await assertProject(user, pid);
-        if (!admin) return J({ error: "forbidden" }, 403);
-        const link = await currentLink(pid);
-        const { data: row } = await db.from("hand_config").select("config").eq("project_id", pid).maybeSingle();
-        const accId = String(mergeCfg(row?.config).unipile_account_id ?? "");
-        return J({
-          state: linkState(link),
-          url: link ? connectUrl(link.token) : "",
-          expires_at: link?.expires_at ?? null,
-          opens: link?.opens ?? 0,
-          connected_at: link?.connected_at ?? null,
-          account_id: accId,
-          account_name: link?.account_name ?? (accId ? await accountName(accId) : ""),
-        });
-      }
-      case "connect.create": {
-        const pid = String(body.project_id ?? "");
-        await assertProject(user, pid);
-        if (!admin) return J({ error: "forbidden" }, 403);
-        const kind = String(body.kind ?? "create") === "reconnect" ? "reconnect" : "create";
-        let reconnect: string | null = null;
-        if (kind === "reconnect") {
-          const { data: row } = await db.from("hand_config").select("config").eq("project_id", pid).maybeSingle();
-          reconnect = String(mergeCfg(row?.config).unipile_account_id ?? "") || null;
-          if (!reconnect) return J({ error: "Projekt nie ma jeszcze podłączonego konta" }, 400);
-        }
-        // stary link przestaje działać w chwili wydania nowego
-        await db.from("hand_connect_links")
-          .update({ revoked_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-          .eq("project_id", pid).is("revoked_at", null).is("connected_at", null);
-        const token = newToken();
-        const { error } = await db.from("hand_connect_links").insert({
-          token, project_id: pid, kind, reconnect_account: reconnect, created_by: user.id,
-          expires_at: new Date(Date.now() + LINK_TTL_DAYS * 86400_000).toISOString(),
-        });
-        if (error) return J({ error: `Nie udało się zapisać linku: ${error.message}` }, 500);
-        return J({ ok: true, url: connectUrl(token), state: "waiting", kind });
-      }
-      case "connect.revoke": {
-        const pid = String(body.project_id ?? "");
-        await assertProject(user, pid);
-        if (!admin) return J({ error: "forbidden" }, 403);
-        await db.from("hand_connect_links")
-          .update({ revoked_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-          .eq("project_id", pid).is("revoked_at", null);
-        return J({ ok: true, state: "none" });
       }
       // Lista kont Unipile — wybór konta dla projektu ma wyłącznie admin.
       case "unipile.accounts": {
