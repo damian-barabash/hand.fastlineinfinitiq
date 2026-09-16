@@ -46,33 +46,52 @@ export default function Shell() {
   // może wpuścić do AI Łowca Leadów kogoś, komu produkt odebrano.
   useEffect(() => {
     let alive = true
-    ensureProductAccess('hand')
-      .then(({ ok }) => {
-        if (alive && !ok) {
-          session.setProj(null)
-          nav('/', { replace: true })
-        }
-      })
-      .catch(() => {})
+    // chwilę później: dane otwartej strony mają wyjść do bramki pierwsze
+    const t = setTimeout(() => {
+      ensureProductAccess('hand')
+        .then(({ ok }) => {
+          if (alive && !ok) {
+            session.setProj(null)
+            nav('/', { replace: true })
+          }
+        })
+        .catch(() => {})
+    }, 1200)
     return () => {
       alive = false
+      clearTimeout(t)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // prefetch: chunki stron + dane sekcji — nawigacja bez czekania
   useEffect(() => {
+    let alive = true
     const idle = window.requestIdleCallback || ((f) => setTimeout(f, 300))
     idle(() => {
       import('../pages/Dashboard.jsx')
       import('../pages/Search.jsx')
       import('../pages/Leads.jsx')
       import('../pages/Chats.jsx')
-      warmHand('stats', { project_id: proj.id, days: 30 })
-      warmHand('leads.list', { project_id: proj.id })
-      warmHand('config.get', { project_id: proj.id })
-      warm('kb.list', { project_id: proj.id })
     })
+    // Dane sekcji podgrzewamy PO KOLEI i z opóźnieniem (jak w Brain): salwa
+    // równoległych żądań na wolnym łączu opóźniała dane otwartej strony.
+    const t = setTimeout(async () => {
+      const jobs = [
+        () => warmHand('stats', { project_id: proj.id, days: 30 }),
+        () => warmHand('leads.list', { project_id: proj.id }),
+        () => warmHand('config.get', { project_id: proj.id }),
+        () => warm('kb.list', { project_id: proj.id }),
+      ]
+      for (const job of jobs) {
+        if (!alive) return
+        await job()
+      }
+    }, 2500)
+    return () => {
+      alive = false
+      clearTimeout(t)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [proj.id])
 

@@ -17,7 +17,7 @@ export {
   getTheme,
   setTheme,
 } from '../shared/platform.js'
-import { FN_BASE, session, invalidateCache } from '../shared/platform.js'
+import { session, invalidateCache, postEdge } from '../shared/platform.js'
 
 const READ_ACTIONS = new Set([
   'config.get',
@@ -28,11 +28,8 @@ const READ_ACTIONS = new Set([
 ])
 
 export async function hand(action, payload = {}) {
-  const r = await fetch(`${FN_BASE}/hand-api`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, token: session.token, ...payload }),
-  })
+  // ten sam transport co brain-admin: bez preflightu, odczyty z limitem czasu i powtórką
+  const r = await postEdge('hand-api', { action, token: session.token, ...payload }, { read: READ_ACTIONS.has(action) })
   const data = await r.json().catch(() => ({}))
   if (r.status === 401) {
     session.clear()
