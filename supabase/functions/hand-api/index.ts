@@ -258,7 +258,7 @@ async function knowledge(projectId: string, cap = 6000) {
   const { data: items } = await db
     .from("brain_kb_items").select("type, title, content, url").eq("project_id", projectId).order("sort").limit(40);
   const { data: prods } = await db
-    .from("brain_products").select("name, description, price, price_currency").eq("project_id", projectId).order("sort").limit(20);
+    .from("brain_products").select("name, description, manual_notes, price, price_currency").eq("project_id", projectId).order("sort").limit(20);
   const parts: string[] = [];
   for (const it of items ?? []) {
     const body = String(it.content ?? it.url ?? "").slice(0, 800);
@@ -266,7 +266,7 @@ async function knowledge(projectId: string, cap = 6000) {
   }
   for (const p of prods ?? []) {
     parts.push(
-      `[produkt] ${p.name}: ${String(p.description ?? "").slice(0, 400)}` +
+      `[produkt] ${p.name}: ${String(p.description ?? "").slice(0, 400)}${p.manual_notes ? ` | ${String(p.manual_notes).slice(0, 200)}` : ""}` +
         (p.price ? ` (od ${p.price} ${p.price_currency ?? "PLN"})` : ""),
     );
   }
