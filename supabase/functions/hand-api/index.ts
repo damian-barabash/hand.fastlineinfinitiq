@@ -695,6 +695,13 @@ async function sentToday(projectId: string, channel?: string) {
 }
 
 // ── wysyłka ─────────────────────────────────────────────────────────────────
+// Ślad wysyłki przez Unipile — brain-hook po nim odróżnia wiadomość Łowcy (wraca webhookiem jako „własna")
+// od człowieka piszącego z tego samego konta LinkedIn; ten drugi wycisza agenta w tym czacie na 48 h.
+async function logUniSent(projectId: string, chatId: string, messageId: string, text: string) {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
+  await db.from("brain_events").insert({ project_id: projectId, type: "uni_sent", data: { chat_id: chatId, message_id: messageId, t, by: "hand" } });
+}
+
 async function sendLinkedIn(cfg: Cfg, lead: Record<string, unknown>, text: string) {
   const accountId = String(cfg.unipile_account_id || "");
   if (!accountId) throw new Error("brak konta LinkedIn w konfiguracji projektu");
@@ -707,6 +714,8 @@ async function sendLinkedIn(cfg: Cfg, lead: Record<string, unknown>, text: strin
       method: "POST",
       body: JSON.stringify({ account_id: accountId, provider_id: urn, message: text.slice(0, 280) }),
     });
+    // notatka z zaproszenia pojawia się w czacie dopiero po jego przyjęciu (bywa, że po dniach) — ślad bez chat_id
+    await logUniSent(String(lead.project_id ?? ""), "", "", text.slice(0, 280));
     return { channel: "linkedin", provider_msg_id: "", status: "invited" as const };
   } catch (e) {
     const msg = String(e);
@@ -716,7 +725,8 @@ async function sendLinkedIn(cfg: Cfg, lead: Record<string, unknown>, text: strin
     method: "POST",
     body: JSON.stringify({ account_id: accountId, attendees_ids: [urn], text }),
   });
-  return { channel: "linkedin", provider_msg_id: String(res?.id ?? ""), status: "sent" as const };
+  await logUniSent(String(lead.project_id ?? ""), String(res?.chat_id ?? ""), String(res?.message_id ?? ""), text);
+  return { channel: "linkedin", provider_msg_id: String(res?.message_id ?? res?.id ?? ""), status: "sent" as const };
 }
 
 // Wspólny kanał e-mail PROJEKTU (`fiq_project_integrations`, kind='email') — ten sam,
@@ -931,6 +941,9 @@ async function handleInbound(payload: Record<string, unknown>) {
     updated_at: new Date().toISOString(),
   }).eq("id", lead.id);
 
+  // człowiek przejął tę rozmowę z konta LinkedIn (brain-hook wyciszył agenta na 48 h) — zapisujemy, nie odpowiadamy
+  if (payload?.muted === true) return J({ ok: true, replied: false, reason: "human_takeover" });
+
   const cfg = await loadCfg(lead.project_id);
   const { data: history } = await db
     .from("hand_messages").select("direction, content").eq("lead_id", lead.id).order("id").limit(20);
@@ -941,7 +954,9 @@ async function handleInbound(payload: Record<string, unknown>) {
     "reply",
     `Prowadzisz rozmowę sprzedażową po polsku, ${cfg.tone.form === "pan" ? "Pan/Pani" : "na Ty"}. ` +
       "Odpowiadasz krótko (2-4 zdania), konkretnie, bez lania wody. Celem jest umówienie krótkiej rozmowy. " +
-      "Jeśli rozmówca odmawia — dziękujesz i kończysz. Zwracasz wyłącznie treść odpowiedzi.",
+      "Jeśli rozmówca odmawia — dziękujesz i kończysz. " +
+      "Źródłem prawdy jest wyłącznie blok CO SPRZEDAJEMY: jeśli wcześniej w rozmowie padło coś, czego tam już nie ma (oferta mogła się zmienić), mówisz wprost, że oferta została zaktualizowana, i podajesz stan aktualny. " +
+      "Zwracasz wyłącznie treść odpowiedzi.",
     `CO SPRZEDAJEMY:\n${kb}\n\nROZMOWA:\n${convo}`,
     360,
   );
