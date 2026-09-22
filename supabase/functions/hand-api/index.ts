@@ -304,15 +304,50 @@ async function knowledge(projectId: string, cap = 7000) {
 // Ten sam mechanizm co u doradcy i sprzedawcy w Brain (brain_feedback), osobny
 // scope — uwaga dobra dla Łowcy („nie pytaj o budżet w pierwszej wiadomości")
 // nie ma nic wspólnego z doradcą na czacie.
-async function lessons(projectId: string) {
+// Ten sam układ, który uratował doradcę (brain-chat v27): instrukcje właściciela stoją
+// NA GÓRZE jako najwyższy priorytet i wracają NA KOŃCU jako lista kontrolna — model 9B
+// gubił wskazówkę doklejoną raz na końcu, gdy reguła wyżej mówiła co innego.
+async function lessons(projectId: string): Promise<{ top: string; tail: string }> {
   const { data } = await db
     .from("brain_feedback").select("note, corrected").eq("project_id", projectId).eq("scope", "hand")
-    .eq("status", "approved").order("created_at", { ascending: false }).limit(12);
+    .eq("status", "approved").order("created_at", { ascending: true }).limit(12);
   const rows = (data ?? []) as { note: string; corrected: string }[];
-  if (!rows.length) return "";
-  return "\nSTAŁE WSKAZÓWKI TRENERA (stosuj zawsze, gdy pasują):\n" +
-    rows.map((r, i) => `${i + 1}. ${String(r.note).slice(0, 300)}${r.corrected ? ` (wzór: ${String(r.corrected).slice(0, 300)})` : ""}`)
-      .join("\n") + "\n";
+  if (!rows.length) return { top: "", tail: "" };
+  const list = rows
+    .map((r, i) => `${i + 1}. ${String(r.note).slice(0, 300)}${r.corrected ? ` (wzór: ${String(r.corrected).slice(0, 300)})` : ""}`)
+    .join("\n");
+  return {
+    top: `INSTRUKCJE WŁAŚCICIELA FIRMY (NAJWYŻSZY PRIORYTET — ważniejsze niż wszystkie reguły niżej; gdy coś się kłóci, wygrywa ta lista):\n${list}\n\n`,
+    tail: `\n\nZANIM ODDASZ TEKST — SPRAWDŹ PO KOLEI:\n${list}\nJeśli którykolwiek punkt nie jest spełniony, popraw tekst przed oddaniem.`,
+  };
+}
+
+// Drugi przebieg: model 9B nie trzyma zakazów („nie pisz, że firma czegoś potrzebuje")
+// w jednym przejściu — w 3 z 4 prób pisał je mimo instrukcji na górze i listy na końcu.
+// Dlatego po napisaniu tekstu osobne wywołanie sprawdza go punkt po punkcie i poprawia
+// TYLKO to, co narusza instrukcje właściciela (jak `syncProductDescription` w Brain).
+async function enforceLessons(projectId: string, L: { top: string; tail: string }, text: string, kind: "linkedin" | "email" | "reply") {
+  if (!L.top || !text) return text;
+  const out = await ask(
+    projectId,
+    "draft",
+    L.top +
+      "Jesteś redaktorem. Dostajesz gotową wiadomość i sprawdzasz ją WYŁĄCZNIE względem powyższych instrukcji właściciela, punkt po punkcie. " +
+      (kind === "reply"
+        ? "To ODPOWIEDŹ w trwającej rozmowie: bez powitania i bez przedstawiania się — instrukcje o powitaniu i pierwszej wiadomości tu nie obowiązują; nie dopisuj „Cześć”. "
+        : "") +
+      "Jeśli wszystko jest spełnione — zwracasz dokładnie: OK. " +
+      "Jeśli coś jest naruszone — zwracasz CAŁĄ wiadomość poprawioną tak, żeby każdy punkt był spełniony; zmieniasz tylko naruszające fragmenty, resztę zostawiasz dosłownie (powitanie, zdanie przedstawienia, pytanie na końcu, podpis" +
+      (kind === "email" ? ", linię TEMAT" : "") + "). " +
+      "Nie dodajesz komentarza, nie używasz cudzysłowów wokół treści, nie skracasz bez potrzeby. Nie pisz „Poprawiona wersja:”.",
+    `WIADOMOŚĆ DO SPRAWDZENIA:\n${text}`,
+    kind === "linkedin" ? 320 : 600,
+    0.1,
+  );
+  if (!out) return text;
+  const clean = out.replace(/^["„]+|["”]+$/g, "").trim();
+  if (/^ok[.!]?$/i.test(clean) || clean.length < 40) return text;
+  return clean;
 }
 
 // ── kim agent jest dla odbiorcy ──────────────────────────────────────────────
@@ -767,11 +802,12 @@ async function draftMessage(projectId: string, cfg: Cfg, kb: string, lead: Recor
   }
   const form = cfg.tone.form === "pan" ? "formę grzecznościową (Pan/Pani)" : "formę bezpośrednią (na Ty)";
   const maxChars = channel === "linkedin" ? Math.min(cfg.tone.max_chars, LI_INVITE_MAX) : cfg.tone.max_chars;
-  const system =
+  const L = await lessons(projectId);
+  const system = L.top +
     `Jesteś ${who.name || "przedstawicielem"} z firmy ${who.company || "(firma z bazy wiedzy)"}. ` +
     `Piszesz pierwszą wiadomość sprzedażową ${channel === "linkedin" ? "jako notatkę do zaproszenia na LinkedIn" : "jako e-mail"}. Po polsku, ${form}. ` +
     `Maksymalnie ${maxChars} znaków treści. Bez korpo-lania, bez „mam nadzieję, że mail zastaje Pana dobrze". ` +
-    "Układ: (1) jedno zdanie z konkretem o odbiorcy, (2) zdanie przedstawienia — DOSŁOWNIE to podane niżej, (3) JEDNA korzyść dopasowana do jego branży, (4) krótkie pytanie na koniec, (5) podpis. " +
+    "Układ: (1) jedno zdanie nawiązujące do odbiorcy (branża, miasto, to, co widać) — NIE twierdzisz, czego odbiorca potrzebuje ani co robi w środku firmy, bo tego nie wiesz; (2) zdanie przedstawienia — DOSŁOWNIE to podane niżej, (3) JEDNA korzyść dopasowana do jego branży, (4) krótkie pytanie na koniec, (5) podpis. " +
     "Powitanie: jeśli znasz imię odbiorcy — „Cześć <imię>,” (na Ty) albo „Dzień dobry Panie/Pani <imię>,”; jeśli NIE znasz imienia — samo „Dzień dobry,” albo „Cześć,”. " +
     "NIGDY „Witaj w <nazwa firmy>” ani „Witaj <nazwa firmy>” — tak wita strona internetowa, nie człowiek. " +
     "NIGDY nie wymyślasz imienia ani nazwiska odbiorcy i nie używasz nazwy firmy jako imienia. " +
@@ -779,7 +815,7 @@ async function draftMessage(projectId: string, cfg: Cfg, kb: string, lead: Recor
     (channel === "email"
       ? "Pierwsza linia odpowiedzi to „TEMAT: <temat maila, 3-7 słów, bez clickbaitu>”, potem pusta linia i treść, na końcu podpis. "
       : "Zwracasz wyłącznie treść notatki, bez tematu i BEZ podpisu — odbiorca widzi Twój profil. To krótka notatka: dokładnie 3 zdania po maksymalnie 15 słów (konkret o odbiorcy · przedstawienie · korzyść zakończona pytaniem). ") +
-    "Bez cudzysłowów wokół treści." + await lessons(projectId);
+    "Bez cudzysłowów wokół treści." + L.tail;
   const user = `CO SPRZEDAJEMY (baza wiedzy):
 ${kb || "(brak)"}
 
@@ -797,6 +833,13 @@ ${channel === "email" ? `Podpisz się dokładnie tak: ${signature}` : "Bez podpi
   const raw = await ask(projectId, "draft", system, user, channel === "linkedin" ? 300 : 520);
   if (!raw) return null;
   let { subject, text } = splitSubject(raw.replace(/^["„]+|["”]+$/g, ""));
+  text = await enforceLessons(projectId, L, text, channel);
+  // redaktor mógł oddać tekst z linią TEMAT — zdejmujemy ją ponownie
+  if (channel === "email") {
+    const again = splitSubject(text);
+    if (again.subject) subject = again.subject;
+    text = again.text;
+  }
   // model 9B potrafi „zapomnieć" podpisu albo powitać jak strona WWW — pilnuje kod, nie nadzieja
   text = text.replace(/^\s*Witaj(?:cie)?\s+(?:w\s+)?[^,\n!]{2,60}[,!]?\s*/i, "Dzień dobry,\n\n");
   if (channel === "email" && !text.includes(signature.split(",")[0])) text = `${text.trim()}\n\n${signature}`;
@@ -809,7 +852,7 @@ ${channel === "email" ? `Podpisz się dokładnie tak: ${signature}` : "Bez podpi
       const shorter = await ask(
         projectId,
         "draft",
-        `Skracasz notatkę do zaproszenia LinkedIn do maksymalnie ${LI_INVITE_MAX - 20} znaków. Zostaw powitanie, zdanie „${intro}” bez zmian i pytanie na końcu; skróć albo usuń środek. Bez podpisu, bez cudzysłowów. Zwracasz tylko skrócony tekst.`,
+        L.top + `Skracasz notatkę do zaproszenia LinkedIn do maksymalnie ${LI_INVITE_MAX - 20} znaków. Zostaw powitanie, zdanie „${intro}” bez zmian i pytanie na końcu; skróć albo usuń środek. Bez podpisu, bez cudzysłowów. Zwracasz tylko skrócony tekst.` + L.tail,
         text,
         220,
         0.2,
@@ -845,20 +888,26 @@ async function replyMessage(projectId: string, cfg: Cfg, lead: Record<string, un
   const channel = channelOf(lead);
   const who = await senderIdentity(projectId, cfg, channel);
   const kb = await knowledge(projectId, 4500);
-  return await ask(
+  const L = await lessons(projectId);
+  const reply = await ask(
     projectId,
     "reply",
-    `Jesteś ${who.name || "przedstawicielem"} z firmy ${who.company || "(firma z bazy wiedzy)"}. ` +
+    L.top + `Jesteś ${who.name || "przedstawicielem"} z firmy ${who.company || "(firma z bazy wiedzy)"}. ` +
       `Prowadzisz rozmowę sprzedażową po polsku, ${cfg.tone.form === "pan" ? "Pan/Pani" : "na Ty"}. ` +
       "Odpowiadasz krótko (2-4 zdania), konkretnie, bez lania wody, na KAŻDE pytanie rozmówcy z ostatniej wiadomości. Celem jest umówienie krótkiej rozmowy — na końcu proponujesz konkret (np. 15 minut telefonicznie w tym tygodniu). " +
       `Trzymasz formę ${cfg.tone.form === "pan" ? "Pan/Pani" : "na Ty"} konsekwentnie, niezależnie od tego, jak pisze rozmówca. ` +
-      "Nie witasz się i nie przedstawiasz ponownie — rozmowa już trwa. " +
+      "Nie witasz się i nie przedstawiasz ponownie — rozmowa już trwa. Nie komentujesz własnych wcześniejszych wiadomości i nie pytasz o nie. Liczby (osoby, dni, ceny) podajesz tylko takie, jakie są w bazie wiedzy; bez nich mówisz, że ustalicie to w rozmowie. " +
       "Jeśli rozmówca odmawia — dziękujesz i kończysz. Jeśli pyta o cenę, której nie ma w bazie wiedzy — mówisz, że wycena zależy od liczby osób i zakresu, i proponujesz rozmowę. " +
       "Źródłem prawdy jest wyłącznie blok CO SPRZEDAJEMY: jeśli wcześniej w rozmowie padło coś, czego tam już nie ma (oferta mogła się zmienić), mówisz wprost, że oferta została zaktualizowana, i podajesz stan aktualny. " +
-      "Bez markdown i emoji. Zwracasz wyłącznie treść odpowiedzi." + await lessons(projectId),
+      "Bez markdown i emoji. Zwracasz wyłącznie treść odpowiedzi." + L.tail,
     `CO SPRZEDAJEMY:\n${kb}\n\nROZMOWA (MY = ${who.name || "my"}, ON = rozmówca):\n${convo}`,
     360,
   );
+  if (!reply) return reply;
+  const checked = await enforceLessons(projectId, L, reply, "reply");
+  // w trwającej rozmowie nie ma powitania — model (i redaktor ze wskazówką „tylko Cześć") i tak je dopisywał
+  const noHello = checked.replace(/^\s*(cześć|hej|dzień dobry|witaj|witam)(\s+[^,\n!.]{0,30})?[,!.]?\s*/i, "").trim();
+  return noHello.charAt(0).toUpperCase() + noHello.slice(1);
 }
 
 // ── limity dzienne i okno pracy ─────────────────────────────────────────────
