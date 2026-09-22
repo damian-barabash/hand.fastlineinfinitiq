@@ -521,6 +521,28 @@ type Cand = {
   meta?: Record<string, unknown>;
 };
 
+const LOC_CACHE = new Map<string, string>();
+async function linkedInLocationId(accountId: string, name: string): Promise<string> {
+  const key = name.trim().toLowerCase();
+  if (!key) return "";
+  if (LOC_CACHE.has(key)) return LOC_CACHE.get(key)!;
+  try {
+    const data = await uniFetch(
+      `/linkedin/search/parameters?account_id=${encodeURIComponent(accountId)}&type=LOCATION&keywords=${encodeURIComponent(name.trim())}&limit=5`,
+      {},
+      20_000,
+    );
+    const items = (data?.items ?? []) as Array<{ id?: string; title?: string }>;
+    // „Polska" → LinkedIn zna kraj jako „Poland": bierzemy pierwszy wynik (najlepsze dopasowanie), nie pełne dopasowanie nazwy
+    const id = String(items[0]?.id ?? "");
+    LOC_CACHE.set(key, id);
+    return id;
+  } catch (e) {
+    console.error("linkedin location lookup:", String(e).slice(0, 160));
+    return "";
+  }
+}
+
 // LinkedIn przez Unipile. Wyszukiwarka Unipile zwraca listę profili dla zapytania
 // „classic" (odpowiednik zwykłego wyszukiwania LinkedIn) — bierzemy pierwszą stronę.
 async function searchLinkedIn(cfg: Cfg, query: string, limit: number): Promise<Cand[]> {
@@ -531,7 +553,11 @@ async function searchLinkedIn(cfg: Cfg, query: string, limit: number): Promise<C
     category: "people",
     keywords: query,
   };
-  if (cfg.icp.location) body.location = [cfg.icp.location];
+  // `location` przyjmuje WYŁĄCZNIE identyfikatory geograficzne LinkedIna (np. Polska = 105072130), nie nazwy —
+  // z nazwą Unipile odpowiadał 400 invalid_parameters i wyszukiwanie padało. Nazwę z ICP tłumaczymy na id
+  // przez /linkedin/search/parameters; gdy się nie da, szukamy bez lokalizacji (lepsze niż błąd).
+  const locId = await linkedInLocationId(accountId, String(cfg.icp.location || ""));
+  if (locId) body.location = [locId];
   const data = await uniFetch(
     `/linkedin/search?account_id=${encodeURIComponent(accountId)}&limit=${Math.min(limit, 50)}`,
     { method: "POST", body: JSON.stringify(body) },
