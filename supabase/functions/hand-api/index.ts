@@ -812,6 +812,18 @@ function splitSubject(text: string) {
   return { subject: m[1].replace(/^["„]|["”]$/g, "").trim().slice(0, 120), text: m[2].trim() };
 }
 
+// Myślnik/pauza nie ma prawa wyjść do klienta (decyzja właściciela 2026-09-22) — model lubi je wstawiać
+// mimo reguły, więc pilnuje kod: zamiana na przecinek, bez podwójnych znaków.
+function noDashes(t: string): string {
+  return t
+    .replace(/\s*[—–]\s*/g, ", ")
+    .replace(/,\s*,/g, ",")
+    .replace(/([.!?:]),\s/g, "$1 ")
+    .replace(/^,\s*/gm, "")
+    // tylko na samym końcu tekstu — przecinek po „Dzień dobry," na końcu linii jest poprawny
+    .replace(/,\s*$/, "");
+}
+
 type Draft = { text: string; subject: string; channel: "linkedin" | "email" };
 // model nie zawsze oddaje linię TEMAT — mail bez tematu nie może wyjść
 const defaultSubject = (lead: Record<string, unknown>) =>
@@ -823,11 +835,11 @@ async function draftMessage(projectId: string, cfg: Cfg, kb: string, lead: Recor
   const signature = cfg.tone.signature || [who.name, who.company].filter(Boolean).join(", ");
   const id = (cfg.identity ?? {}) as Record<string, string>;
   const custom = String((channel === "linkedin" ? id.intro_linkedin : id.intro_email) ?? "").trim();
-  const intro = custom
+  const intro = noDashes(custom
     ? custom.replace(/\{imie\}/gi, who.name).replace(/\{firma\}/gi, who.company)
     : who.name && who.company
     ? `Nazywam się ${who.name} i piszę z ${who.company}.`
-    : who.company ? `Piszę z ${who.company}.` : "(nie przedstawiaj się z nazwiska — nie znasz go)";
+    : who.company ? `Piszę z ${who.company}.` : "(nie przedstawiaj się z nazwiska, bo go nie znasz)");
   if (cfg.tone.template) {
     // sztywny szablon: tylko podstawienie zmiennych, zero improwizacji
     const text = String(cfg.tone.template)
@@ -852,6 +864,7 @@ async function draftMessage(projectId: string, cfg: Cfg, kb: string, lead: Recor
     "NIGDY „Witaj w <nazwa firmy>” ani „Witaj <nazwa firmy>” — tak wita strona internetowa, nie człowiek. " +
     "NIGDY nie wymyślasz imienia ani nazwiska odbiorcy i nie używasz nazwy firmy jako imienia. " +
     "Wymieniasz TYLKO atrakcje, samochody, tory, liczby, ceny i terminy, które stoją w bazie wiedzy; jeśli w bazie nie ma listy samochodów, piszesz ogólnie („samochody sportowe z naszej floty”). Nie używasz markdown ani emoji. " +
+    "JĘZYK: wyłącznie naturalna polszczyzna, jak w rozmowie między ludźmi; bez angielskich wtrąceń (nie „team building”, „event”, „feedback”, tylko „integracja zespołu”, „wydarzenie”, „opinia”; nazwy własne i nazwy produktów zostają); bez myślników i pauz (— –), zamiast nich przecinek albo kropka; bez kalek z korpomowy. " +
     (channel === "email"
       ? "Pierwsza linia odpowiedzi to „TEMAT: <temat maila, 3-7 słów, bez clickbaitu>”, potem pusta linia i treść, na końcu podpis. "
       : "Zwracasz wyłącznie treść notatki, bez tematu i BEZ podpisu — odbiorca widzi Twój profil. To krótka notatka: dokładnie 3 zdania po maksymalnie 15 słów (konkret o odbiorcy · przedstawienie · korzyść zakończona pytaniem). ") +
@@ -871,7 +884,7 @@ Zdanie przedstawienia (użyj dosłownie, jako drugie zdanie): ${intro}
 ${channel === "email" ? `Podpisz się dokładnie tak: ${signature}` : "Bez podpisu."}`;
   const raw = await ask(projectId, "draft", system, user, channel === "linkedin" ? 300 : 520);
   if (!raw) return null;
-  let { subject, text } = splitSubject(raw.replace(/^["„]+|["”]+$/g, ""));
+  let { subject, text } = splitSubject(noDashes(raw.replace(/^["„]+|["”]+$/g, "")));
   if (weak) text = await enforceLessons(projectId, L, text, channel);
   // redaktor mógł oddać tekst z linią TEMAT — zdejmujemy ją ponownie
   if (channel === "email") {
@@ -968,14 +981,14 @@ async function replyMessage(projectId: string, cfg: Cfg, lead: Record<string, un
       "Nie witasz się i nie przedstawiasz ponownie — rozmowa już trwa. Nie komentujesz własnych wcześniejszych wiadomości i nie pytasz o nie. Liczby (osoby, dni, ceny) podajesz tylko takie, jakie są w bazie wiedzy; bez nich mówisz, że ustalicie to w rozmowie. " +
       "Jeśli rozmówca odmawia — dziękujesz i kończysz. Jeśli pyta o cenę, której nie ma w bazie wiedzy — mówisz, że wycena zależy od liczby osób i zakresu, i proponujesz rozmowę. " +
       "Źródłem prawdy jest wyłącznie blok CO SPRZEDAJEMY: jeśli wcześniej w rozmowie padło coś, czego tam już nie ma (oferta mogła się zmienić), mówisz wprost, że oferta została zaktualizowana, i podajesz stan aktualny. " +
-      "Bez markdown i emoji. Zwracasz wyłącznie treść odpowiedzi." + L.tail + `\n\nCO SPRZEDAJEMY:\n${kb}`,
+      "Bez markdown i emoji. JĘZYK: wyłącznie naturalna polszczyzna, jak w rozmowie między ludźmi; bez angielskich wtrąceń (nie „team building”, „event”, „feedback”, tylko „integracja zespołu”, „wydarzenie”, „opinia”; nazwy własne i nazwy produktów zostają); bez myślników i pauz (— –), zamiast nich przecinek albo kropka; bez kalek z korpomowy. Zwracasz wyłącznie treść odpowiedzi." + L.tail + `\n\nCO SPRZEDAJEMY:\n${kb}`,
     `ROZMOWA (MY = ${who.name || "my"}, ON = rozmówca):\n${convo}`,
     360,
   );
   if (!reply) return reply;
   const checked = isWeakModel(await currentModel()) ? await enforceLessons(projectId, L, reply, "reply") : reply;
   // w trwającej rozmowie nie ma powitania — model (i redaktor ze wskazówką „tylko Cześć") i tak je dopisywał
-  const noHello = checked.replace(/^\s*(cześć|hej|dzień dobry|witaj|witam)(\s+[^,\n!.]{0,30})?[,!.]?\s*/i, "").trim();
+  const noHello = noDashes(checked).replace(/^\s*(cześć|hej|dzień dobry|witaj|witam)(\s+[^,\n!.]{0,30})?[,!.]?\s*/i, "").trim();
   return noHello.charAt(0).toUpperCase() + noHello.slice(1);
 }
 

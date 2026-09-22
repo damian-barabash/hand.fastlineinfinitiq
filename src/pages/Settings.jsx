@@ -188,7 +188,7 @@ export default function Settings() {
               <input
                 value={ident.intro_linkedin || ''}
                 onChange={(e) => setIdent('intro_linkedin', e.target.value)}
-                placeholder="Jestem {imie}, kierowca wyścigowy — prowadzę {firma}."
+                placeholder="Jestem {imie}, kierowca wyścigowy prowadzący {firma}."
               />
             </label>
             <label className="f">
