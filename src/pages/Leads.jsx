@@ -47,6 +47,25 @@ export default function Leads() {
   const [channel, setChannel] = useState('')
   const [busy, setBusy] = useState('')
   const [err, setErr] = useState('')
+  const [sendInfo, setSendInfo] = useState(null)
+  const readyCount = (leads ?? []).filter((l) => l.status === 'ready').length
+
+  // jedna partia do wszystkich gotowych, do których agent jeszcze nie pisał (do 10 na klik, w limicie dziennym)
+  async function sendNew() {
+    if (!readyCount) return
+    if (!confirm(`Wysłać pierwszą wiadomość do ${Math.min(readyCount, 10)} gotowych leadów? Każda idzie tym kanałem, którym da się dotrzeć (LinkedIn albo e-mail).`)) return
+    setBusy('sendNew')
+    setErr('')
+    try {
+      const d = await hand('leads.sendNew', { project_id: proj.id })
+      setSendInfo(d)
+      await load()
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setBusy('')
+    }
+  }
 
   const load = () =>
     hand('leads.list', { project_id: proj.id, status: status || undefined })
@@ -120,10 +139,22 @@ export default function Leads() {
             Wynik 0–100 wystawia model, porównując kandydata z profilem klienta i bazą wiedzy. Obok masz powód tej oceny.
           </p>
         </div>
-        <button className="btn sm" onClick={load}>
-          <IcRefresh /> Odśwież
-        </button>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn primary" onClick={sendNew} disabled={busy === 'sendNew' || !readyCount} title="Pierwsza wiadomość do wszystkich gotowych, do których agent jeszcze nie pisał">
+            <IcSend /> {busy === 'sendNew' ? 'Wysyłam…' : `Wyślij do nowych${readyCount ? ` (${readyCount})` : ''}`}
+          </button>
+          <button className="btn sm" onClick={load}>
+            <IcRefresh /> Odśwież
+          </button>
+        </div>
       </div>
+      {sendInfo && (
+        <div className="note" style={{ marginBottom: 14 }}>
+          Wysłano {sendInfo.sent}{sendInfo.failed ? `, nie udało się ${sendInfo.failed} (powód przy leadzie)` : ''}.
+          {sendInfo.left ? ` Zostało ${sendInfo.left} gotowych — kliknij jeszcze raz.` : ' Wszyscy gotowi mają już pierwszą wiadomość.'}
+          {' '}Limit dzienny: jeszcze {sendInfo.limit_left}.
+        </div>
+      )}
 
       <div className="row" style={{ gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
         <div className="chips">

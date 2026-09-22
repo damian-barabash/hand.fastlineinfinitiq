@@ -1138,22 +1138,60 @@ async function deliver(projectId: string, cfg: Cfg, lead: Record<string, unknown
 const reachable = (c: { li_urn?: string; email?: string }, cfg: Cfg) => !!(c.li_urn || (c.email && cfg.email.enabled));
 
 // ── uruchomienie wyszukiwania ───────────────────────────────────────────────
-async function runSearch(projectId: string, source: string, query: string, limit: number) {
+// Kilka zapytań w jednym polu („właściciel, prezes, HR manager") — LinkedIn szuka wszystkich
+// słów naraz, więc jedna fraza z ośmiu tytułów dawała 3 osoby. Każdy kawałek idzie osobno,
+// wyniki się sumują i deduplikują.
+function splitQueries(q: string | string[]): string[] {
+  const raw = Array.isArray(q) ? q : String(q ?? "").split(/[\n;|,]/);
+  const out: string[] = [];
+  for (const x of raw) {
+    const t = String(x).trim();
+    if (t && !out.includes(t)) out.push(t);
+  }
+  return out.slice(0, 12);
+}
+
+type SearchResult = { ok: boolean; found: number; added: number; skipped: number; sent?: number; error?: string };
+
+// Rdzeń wyszukiwania: ręczne „Szukaj" i kampanie idą tą samą drogą, różni się tylko źródło wywołania.
+async function doSearch(projectId: string, source: string, queries: string[], limit: number, campaignId: string | null = null): Promise<SearchResult> {
   const cfg = await loadCfg(projectId);
   const { data: run } = await db
-    .from("hand_runs").insert({ project_id: projectId, source, query, status: "running" }).select("id").single();
+    .from("hand_runs").insert({ project_id: projectId, source, query: queries.join(", "), status: "running", campaign_id: campaignId }).select("id").single();
   const runId = run!.id as string;
-  const fail = async (msg: string) => {
-    await db.from("hand_runs").update({ status: "error", error: msg.slice(0, 400), finished_at: new Date().toISOString() })
-      .eq("id", runId);
-    return J({ error: msg }, 400);
+  const fail = async (msg: string): Promise<SearchResult> => {
+    await db.from("hand_runs").update({ status: "error", error: msg.slice(0, 400), finished_at: new Date().toISOString() }).eq("id", runId);
+    return { ok: false, found: 0, added: 0, skipped: 0, error: msg };
   };
   try {
+    if (!["linkedin", "maps", "web"].includes(source)) return await fail("nieznane źródło");
+    if (!queries.length) return await fail("Wpisz, czego szukamy");
+    // limit dzieli się między zapytania (min 5 na zapytanie), całość obcinamy do limitu na końcu
+    const per = Math.max(5, Math.ceil(limit / queries.length));
+    const deadline = Date.now() + 70_000;
+    const seenKey = new Set<string>();
     let cands: Cand[] = [];
-    if (source === "linkedin") cands = await searchLinkedIn(cfg, query, limit);
-    else if (source === "maps") cands = await searchMaps(query, limit);
-    else if (source === "web") cands = await searchWeb(query, limit);
-    else return await fail("nieznane źródło");
+    for (const q of queries) {
+      if (Date.now() > deadline) break;
+      let part: Cand[] = [];
+      try {
+        if (source === "linkedin") part = await searchLinkedIn(cfg, q, per);
+        else if (source === "maps") part = await searchMaps(q, per);
+        else part = await searchWeb(q, per);
+      } catch (e) {
+        // jedno zapytanie padło (np. Yahoo 500) — reszta niech idzie; błąd tylko gdy wszystkie padną
+        if (queries.length === 1) throw e;
+        console.error("search part failed:", q, String(e).slice(0, 160));
+        continue;
+      }
+      for (const c of part) {
+        const k = c.li_urn ? "u:" + c.li_urn : c.website ? "w:" + c.website : "c:" + (c.company ?? "").toLowerCase();
+        if (seenKey.has(k)) continue;
+        seenKey.add(k);
+        cands.push(c);
+      }
+    }
+    cands = cands.slice(0, limit);
 
     // odsiewamy to, co już mamy — po LinkedIn URN, stronie albo nazwie firmy
     const { data: existing } = await db
@@ -1202,7 +1240,7 @@ async function runSearch(projectId: string, source: string, query: string, limit
         phone: c.phone ?? "",
         score,
         why: s?.why ?? "",
-        meta: c.meta ?? {},
+        meta: { ...(c.meta ?? {}), ...(campaignId ? { campaign_id: campaignId } : {}) },
       };
     });
     let added = 0;
@@ -1215,13 +1253,123 @@ async function runSearch(projectId: string, source: string, query: string, limit
     }
     await db.from("hand_runs")
       .update({ status: "done", found: cands.length, added, finished_at: new Date().toISOString() }).eq("id", runId);
-    return J({ ok: true, found: cands.length, added, skipped: cands.length - fresh.length });
+    // autopilot: nie czekamy na cron — piszemy od razu do tego, co właśnie znaleźliśmy (w godzinach pracy i w limitach)
+    let sent = 0;
+    if (added && cfg.autopilot && inWorkHours(cfg)) {
+      const r = await sendBatch(projectId, cfg, 10, Date.now() + 60_000);
+      sent = r.sent;
+    }
+    return { ok: true, found: cands.length, added, skipped: cands.length - fresh.length, sent };
   } catch (e) {
     return await fail(String((e as Error).message ?? e));
   }
 }
 
+async function runSearch(projectId: string, source: string, query: string | string[], limit: number) {
+  const r = await doSearch(projectId, source, splitQueries(query), limit);
+  return r.ok ? J(r) : J({ error: r.error }, 400);
+}
+
+// ── kampanie: to samo wyszukiwanie codziennie o stałej porze ────────────────
+type Campaign = { id: string; project_id: string; name: string; source: string; queries: string[]; per_run: number; hour: number; days: number[]; status: string; next_run_at: string | null; runs_count: number; found_total: number; added_total: number };
+
+// następny termin: najbliższy dzień z listy o zadanej godzinie czasu polskiego, ale nie wcześniej niż za chwilę
+function nextRunAt(hour: number, days: number[], from = new Date()): string {
+  const offs = isDst(from) ? 2 : 1;
+  for (let d = 0; d <= 8; d++) {
+    const local = new Date(from.getTime() + offs * 3600_000 + d * 864e5);
+    const day = local.getUTCDay() === 0 ? 7 : local.getUTCDay();
+    if (!days.includes(day)) continue;
+    const at = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate(), hour, 0, 0) - offs * 3600_000;
+    if (at > from.getTime() + 60_000) return new Date(at).toISOString();
+  }
+  return new Date(from.getTime() + 864e5).toISOString();
+}
+
+async function runCampaign(c: Campaign): Promise<SearchResult> {
+  const r = await doSearch(c.project_id, c.source, splitQueries(c.queries), Math.min(Math.max(c.per_run || 20, 5), 40), c.id);
+  await db.from("hand_campaigns").update({
+    last_run_at: new Date().toISOString(),
+    next_run_at: nextRunAt(c.hour, c.days),
+    runs_count: (c.runs_count ?? 0) + 1,
+    found_total: (c.found_total ?? 0) + r.found,
+    added_total: (c.added_total ?? 0) + r.added,
+    last_error: r.ok ? null : String(r.error ?? "").slice(0, 300),
+    updated_at: new Date().toISOString(),
+  }).eq("id", c.id);
+  return r;
+}
+
+// cron co 5 min: jedna zaległa kampania na wywołanie (wyszukiwanie + kwalifikacja ≈ 30–70 s,
+// izolat żyje 150 s) — kolejne kampanie tego samego dnia idą w kolejnych przebiegach
+async function campaignsRun() {
+  const { data } = await db
+    .from("hand_campaigns").select("*").eq("status", "active").lte("next_run_at", new Date().toISOString())
+    .order("next_run_at").limit(1);
+  const c = (data ?? [])[0] as Campaign | undefined;
+  if (!c) return J({ ok: true, ran: 0 });
+  // rezerwacja: przesuwamy termin ZANIM ruszy wyszukiwanie — dwa równoległe przebiegi nie zrobią tego samego
+  await db.from("hand_campaigns").update({ next_run_at: nextRunAt(c.hour, c.days) }).eq("id", c.id).eq("next_run_at", c.next_run_at);
+  const r = await runCampaign(c);
+  return J({ ran: 1, campaign: c.id, ...r });
+}
+
 // ── tick: wysyłka w limitach (cron co minutę) ───────────────────────────────
+// Wysyłka partii do leadów „gotowych" (status ready = decyzja: próg albo ręczna akceptacja).
+// Wspólna dla crona (autopilot), przycisku „Wyślij do nowych" i wysyłki zaraz po wyszukiwaniu.
+// ⚠️ Bez filtra po score: lead zaakceptowany ręcznie spod progu też ma status ready i MA wyjść —
+// stary tick filtrował `score >= próg`, więc ręczna akceptacja nic nie dawała.
+async function sendBatch(pid: string, cfg: Cfg, max: number, deadline: number): Promise<{ sent: number; failed: number; left: number }> {
+  const outToday = await sentToday(pid);
+  const room = Math.max(0, cfg.limits.messages_per_day - outToday);
+  const take = Math.min(room, max);
+  const { count: readyCount } = await db.from("hand_leads").select("id", { count: "exact", head: true }).eq("project_id", pid).eq("status", "ready");
+  if (take <= 0) return { sent: 0, failed: 0, left: readyCount ?? 0 };
+  const { data: leads } = await db
+    .from("hand_leads").select("*").eq("project_id", pid).eq("status", "ready")
+    .or(`next_at.is.null,next_at.lte.${new Date().toISOString()}`)
+    .order("score", { ascending: false }).limit(take);
+  if (!leads?.length) return { sent: 0, failed: 0, left: readyCount ?? 0 };
+  const kb = await knowledge(pid);
+  let sent = 0, failed = 0;
+  for (const lead of leads) {
+    if (Date.now() > deadline) break;
+    try {
+      const draft = await draftMessage(pid, cfg, kb, lead);
+      if (!draft?.text) throw new Error("model nie zwrócił treści");
+      const res = await deliver(pid, cfg, lead, draft.text, draft.subject);
+      await db.from("hand_messages").insert({
+        lead_id: lead.id,
+        project_id: pid,
+        channel: res.channel,
+        direction: "out",
+        content: draft.subject && res.channel === "email" ? `Temat: ${draft.subject}\n\n${draft.text}` : draft.text,
+        status: res.status,
+        provider_msg_id: res.provider_msg_id || null,
+      });
+      await db.from("hand_leads").update({
+        status: "contacted",
+        last_out_at: new Date().toISOString(),
+        attempts: (lead.attempts ?? 0) + 1,
+        updated_at: new Date().toISOString(),
+      }).eq("id", lead.id);
+      sent++;
+    } catch (e) {
+      failed++;
+      // nie blokujemy kolejki jednym leadem — odkładamy go i lecimy dalej
+      await db.from("hand_leads").update({
+        status: (lead.attempts ?? 0) >= 2 ? "failed" : "ready",
+        attempts: (lead.attempts ?? 0) + 1,
+        why: String((e as Error).message ?? e).slice(0, 300),
+        next_at: new Date(Date.now() + 3600_000).toISOString(),
+        updated_at: new Date().toISOString(),
+      }).eq("id", lead.id);
+    }
+  }
+  const { count: after } = await db.from("hand_leads").select("id", { count: "exact", head: true }).eq("project_id", pid).eq("status", "ready");
+  return { sent, failed, left: after ?? 0 };
+}
+
 async function tick() {
   const { data: cfgs } = await db.from("hand_config").select("project_id, config").limit(200);
   const report: Record<string, unknown>[] = [];
@@ -1231,49 +1379,8 @@ async function tick() {
     const pid = row.project_id as string;
     const cfg = await withLinkedIn(pid, mergeCfg(row.config));
     if (!cfg.autopilot || !inWorkHours(cfg)) continue;
-    const outToday = await sentToday(pid);
-    const left = Math.min(cfg.limits.messages_per_day - outToday, 4); // max 4 na tick — rozkłada wysyłkę w czasie
-    if (left <= 0) continue;
-    const { data: leads } = await db
-      .from("hand_leads").select("*").eq("project_id", pid).eq("status", "ready")
-      .gte("score", cfg.score_threshold).order("score", { ascending: false }).limit(left);
-    if (!leads?.length) continue;
-    const kb = await knowledge(pid);
-    let sent = 0;
-    for (const lead of leads) {
-      if (Date.now() > deadline) break;
-      try {
-        const draft = await draftMessage(pid, cfg, kb, lead);
-        if (!draft?.text) throw new Error("model nie zwrócił treści");
-        const res = await deliver(pid, cfg, lead, draft.text, draft.subject);
-        await db.from("hand_messages").insert({
-          lead_id: lead.id,
-          project_id: pid,
-          channel: res.channel,
-          direction: "out",
-          content: draft.subject && res.channel === "email" ? `Temat: ${draft.subject}\n\n${draft.text}` : draft.text,
-          status: res.status,
-          provider_msg_id: res.provider_msg_id || null,
-        });
-        await db.from("hand_leads").update({
-          status: "contacted",
-          last_out_at: new Date().toISOString(),
-          attempts: (lead.attempts ?? 0) + 1,
-          updated_at: new Date().toISOString(),
-        }).eq("id", lead.id);
-        sent++;
-      } catch (e) {
-        // nie blokujemy kolejki jednym leadem — odkładamy go i lecimy dalej
-        await db.from("hand_leads").update({
-          status: (lead.attempts ?? 0) >= 2 ? "failed" : "ready",
-          attempts: (lead.attempts ?? 0) + 1,
-          why: String((e as Error).message ?? e).slice(0, 300),
-          next_at: new Date(Date.now() + 3600_000).toISOString(),
-          updated_at: new Date().toISOString(),
-        }).eq("id", lead.id);
-      }
-    }
-    if (sent) report.push({ project_id: pid, sent });
+    const r = await sendBatch(pid, cfg, 4, deadline); // max 4 na tick — rozkłada wysyłkę w czasie
+    if (r.sent || r.failed) report.push({ project_id: pid, ...r });
   }
   return J({ ok: true, projects: report });
 }
@@ -1346,6 +1453,7 @@ serve(async (req) => {
   const cronKey = req.headers.get("x-hand-key") ?? "";
   const isCron = !!cronKey && cronKey === (Deno.env.get("HAND_CRON_KEY") ?? "___");
   if (isCron && action === "tick") return await tick();
+  if (isCron && action === "campaigns.run") return await campaignsRun();
   if (isCron && action === "webhook") return await handleInbound((body.payload ?? body) as Record<string, unknown>);
 
   const user = await authUser(String(body.token ?? ""));
@@ -1384,6 +1492,69 @@ serve(async (req) => {
         if (!query) return J({ error: "Wpisz, czego szukamy" }, 400);
         return await runSearch(pid, source, query, Math.min(Number(body.limit) || 20, 40));
       }
+      // ── kampanie ──────────────────────────────────────────────────────
+      case "campaign.list": {
+        const pid = String(body.project_id ?? "");
+        await assertProject(user, pid);
+        const { data } = await db.from("hand_campaigns").select("*").eq("project_id", pid).order("created_at", { ascending: false });
+        return J({ campaigns: data ?? [] });
+      }
+      case "campaign.create": {
+        const pid = String(body.project_id ?? "");
+        await assertProject(user, pid);
+        const queries = splitQueries((body.queries as string[] | string) ?? "");
+        if (!queries.length) return J({ error: "Wpisz przynajmniej jedno zapytanie" }, 400);
+        const source = ["linkedin", "maps", "web"].includes(String(body.source)) ? String(body.source) : "linkedin";
+        const hour = Math.min(23, Math.max(0, Number(body.hour) || 9));
+        const days = (Array.isArray(body.days) ? body.days : [1, 2, 3, 4, 5]).map(Number).filter((d) => d >= 1 && d <= 7);
+        const row = {
+          project_id: pid,
+          name: String(body.name ?? "").trim().slice(0, 120),
+          source,
+          queries,
+          per_run: Math.min(40, Math.max(5, Number(body.per_run) || 20)),
+          hour,
+          days: days.length ? days : [1, 2, 3, 4, 5],
+          status: "active",
+          next_run_at: nextRunAt(hour, days.length ? days : [1, 2, 3, 4, 5]),
+        };
+        const { data, error } = await db.from("hand_campaigns").insert(row).select("*").single();
+        if (error) return J({ error: error.message }, 400);
+        return J({ campaign: data });
+      }
+      case "campaign.set": {
+        const id = String(body.id ?? "");
+        const { data: c } = await db.from("hand_campaigns").select("*").eq("id", id).maybeSingle();
+        if (!c) return J({ error: "nie znaleziono" }, 404);
+        await assertProject(user, c.project_id);
+        const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+        if (body.status !== undefined) {
+          const st = String(body.status);
+          if (!["active", "paused", "stopped"].includes(st)) return J({ error: "zły status" }, 400);
+          patch.status = st;
+          // wznowienie: liczymy termin od nowa, żeby zaległe dni nie ruszyły wszystkie naraz
+          if (st === "active") patch.next_run_at = nextRunAt(c.hour, c.days);
+        }
+        await db.from("hand_campaigns").update(patch).eq("id", id);
+        return J({ ok: true });
+      }
+      case "campaign.delete": {
+        const id = String(body.id ?? "");
+        const { data: c } = await db.from("hand_campaigns").select("project_id").eq("id", id).maybeSingle();
+        if (!c) return J({ error: "nie znaleziono" }, 404);
+        await assertProject(user, c.project_id);
+        await db.from("hand_campaigns").delete().eq("id", id);
+        return J({ ok: true });
+      }
+      // „Szukaj teraz" — ten sam przebieg co z crona, na żądanie
+      case "campaign.run": {
+        const id = String(body.id ?? "");
+        const { data: c } = await db.from("hand_campaigns").select("*").eq("id", id).maybeSingle();
+        if (!c) return J({ error: "nie znaleziono" }, 404);
+        await assertProject(user, c.project_id);
+        const r = await runCampaign(c as Campaign);
+        return J(r.ok ? r : { ...r, error: r.error });
+      }
       case "runs.list": {
         const pid = String(body.project_id ?? "");
         await assertProject(user, pid);
@@ -1401,6 +1572,15 @@ serve(async (req) => {
         if (body.source) q = q.eq("source", String(body.source));
         const { data } = await q;
         return J({ leads: data ?? [] });
+      }
+      // „Wyślij do nowych": jedna partia do leadów gotowych (do 10 na klik, w limicie dziennym; godziny pracy
+      // nie obowiązują — to świadoma decyzja człowieka). Przycisk pokazuje, ile zostało, i można kliknąć znów.
+      case "leads.sendNew": {
+        const pid = String(body.project_id ?? "");
+        await assertProject(user, pid);
+        const cfg = await loadCfg(pid);
+        const r = await sendBatch(pid, cfg, Math.min(Number(body.max) || 10, 10), Date.now() + 110_000);
+        return J({ ok: true, ...r, limit_left: Math.max(0, cfg.limits.messages_per_day - (await sentToday(pid))) });
       }
       case "lead.act": {
         const id = String(body.id ?? "");
