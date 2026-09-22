@@ -182,9 +182,28 @@ export default function Settings() {
               <input value={ident.name} onChange={(e) => setIdent('name', e.target.value)} placeholder="Łukasz Kaźmierczak" />
             </label>
           </div>
+          <div className="fgrid">
+            <label className="f">
+              <span className="mono">Zdanie przedstawienia — LinkedIn (puste = domyślne)</span>
+              <input
+                value={ident.intro_linkedin || ''}
+                onChange={(e) => setIdent('intro_linkedin', e.target.value)}
+                placeholder="Jestem {imie}, kierowca wyścigowy — prowadzę {firma}."
+              />
+            </label>
+            <label className="f">
+              <span className="mono">Zdanie przedstawienia — e-mail (puste = domyślne)</span>
+              <input
+                value={ident.intro_email || ''}
+                onChange={(e) => setIdent('intro_email', e.target.value)}
+                placeholder="Nazywam się {imie} i piszę z {firma}."
+              />
+            </label>
+          </div>
           <p className="chart-tip">
-            Agent przedstawia się jednym zdaniem: „Nazywam się {ident.name || '<osoba>'} i piszę z {ident.company || '<firma>'}." —
-            a w mailu podpisuje się tak samo (chyba że wpiszesz własny podpis niżej).
+            Domyślnie agent przedstawia się zdaniem „Nazywam się {ident.name || '<osoba>'} i piszę z {ident.company || '<firma>'}."; własne zdanie
+            wchodzi do wiadomości dosłownie ({'{imie}'} = osoba z kanału, {'{firma}'} = firma wyżej). W mailu podpisuje się tak samo, chyba że
+            wpiszesz własny podpis niżej.
           </p>
           <div className="row" style={{ gap: 8, marginTop: 12 }}>
             <button className="btn primary" onClick={() => save()} disabled={busy}>

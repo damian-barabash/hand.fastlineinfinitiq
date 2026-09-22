@@ -57,7 +57,9 @@ const DEFAULT_CONFIG = {
   // konta (to jego profil — nie da się pisać jako ktoś inny). W e-mailu `name`
   // to osoba, która się podpisuje (puste = nazwa nadawcy skrzynki). Firma to
   // marka, którą się przedstawia — nazwa projektu („FRA b2b") do tego się nie nadaje.
-  identity: { name: "", company: "" },
+  // intro_*: własne zdanie przedstawienia na kanał (puste = „Nazywam się X i piszę z Y.");
+  // zmienne {imie} {firma}. Właściciel chce np. „Jestem kierowcą wyścigowym i prowadzę FRA".
+  identity: { name: "", company: "", intro_linkedin: "", intro_email: "" },
 };
 
 // Notatka do zaproszenia LinkedIn ma twardy limit u LinkedIna (300 znaków) —
@@ -163,18 +165,49 @@ async function uniFetch(path: string, init: RequestInit = {}, timeout = 25_000) 
 // ── dostawca AI (ten sam co w Brain: ustawienie ai_provider) ────────────────
 type AiCfg = { base_url?: string; model?: string; temperature?: number; max_tokens?: number; key_secret?: string; api_key?: string };
 
-// Ceny za 1M tokenów — do metryki „wydatki na model". Nieznany model liczymy
-// po najbliższej stawce DeepSeeka, żeby wykres nigdy nie był pusty.
-const PRICES: Record<string, [number, number]> = {
-  "deepseek-chat": [0.27, 1.1],
-  "deepseek-reasoner": [0.55, 2.19],
-  "gpt-4o-mini": [0.15, 0.6],
-  "gpt-4o": [2.5, 10],
+// Cennik DeepSeek (USD za 1M tokenów, stan 2026-09): [wejście bez cache, wejście z cache, wyjście]
+// w godzinach szczytu; poza szczytem połowa. Szczyt: pn–pt 01:00–04:00 i 06:00–10:00 UTC.
+// Model lokalny (qwen na Barabash AI) kosztuje 0 — serwer jest własny.
+// TEN SAM blok w brain-chat / brain-sales / brain-admin (żelazna zasada synchronizacji).
+const PRICES: Record<string, [number, number, number]> = {
+  "deepseek-v4-pro": [1.32, 0.044, 3.96],
+  "deepseek-reasoner": [1.32, 0.044, 3.96],
+  "deepseek-flash": [0.3, 0.006, 1.2],
+  "deepseek-chat": [0.3, 0.006, 1.2],
+  "deepseek": [0.3, 0.006, 1.2],
+  "gpt-4o-mini": [0.15, 0.075, 0.6],
+  "gpt-4o": [2.5, 1.25, 10],
 };
-const priceOf = (model: string) => {
-  const k = Object.keys(PRICES).find((p) => model.toLowerCase().includes(p));
-  return k ? PRICES[k] : [0.27, 1.1];
-};
+function isPeakUtc(d = new Date()) {
+  const day = d.getUTCDay(), h = d.getUTCHours();
+  return day >= 1 && day <= 5 && ((h >= 1 && h < 4) || (h >= 6 && h < 10));
+}
+type Usage = { prompt_tokens?: number; completion_tokens?: number; prompt_cache_hit_tokens?: number; prompt_cache_miss_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
+function costUsd(model: string, u: Usage | undefined) {
+  const m = model.toLowerCase();
+  const k = Object.keys(PRICES).find((p) => m.includes(p));
+  if (!k || !u) return 0;
+  const [inMiss, inHit, out] = PRICES[k].map((x) => (isPeakUtc() ? x : x / 2));
+  const pt = Number(u.prompt_tokens ?? 0);
+  const hit = Number(u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0);
+  const miss = Number(u.prompt_cache_miss_tokens ?? Math.max(0, pt - hit));
+  return +((miss / 1e6) * inMiss + (hit / 1e6) * inHit + (Number(u.completion_tokens ?? 0) / 1e6) * out).toFixed(6);
+}
+// modele „myślące" (DeepSeek V4) zjadają max_tokens na rozumowanie i oddają pustą treść —
+// nasze zadania są krótkie i instrukcyjne, myślenie wyłączamy; lokalny qwen tego pola nie zna i ignoruje
+function usageParts(u: Usage | undefined) {
+  const pt = Number(u?.prompt_tokens ?? 0);
+  const hit = Number(u?.prompt_cache_hit_tokens ?? u?.prompt_tokens_details?.cached_tokens ?? 0);
+  const miss = Number(u?.prompt_cache_miss_tokens ?? Math.max(0, pt - hit));
+  return { pt, hit, miss, ct: Number(u?.completion_tokens ?? 0), peak: isPeakUtc() };
+}
+const isDeepSeek = (model: string) => /deepseek/i.test(model);
+// słaby model lokalny wymaga dodatkowych przebiegów (redaktor, pytanie); mocny robi to w jednym
+const isWeakModel = (model: string) => /qwen|llama|mistral|gemma|phi|:\d+b/i.test(model);
+
+async function currentModel() {
+  return providerConfig(await aiConfig()).model;
+}
 
 async function aiConfig(): Promise<AiCfg> {
   const { data } = await db.from("brain_settings").select("value").eq("key", "ai_provider").maybeSingle();
@@ -210,6 +243,7 @@ async function ask(projectId: string, action: string, system: string, user: stri
         temperature: temperature ?? ai.temperature ?? 0.5,
         max_tokens: maxTokens,
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
+        ...(isDeepSeek(model) ? { thinking: { type: "disabled" } } : {}),
       }),
       signal: AbortSignal.timeout(70_000),
     });
@@ -232,7 +266,6 @@ async function ask(projectId: string, action: string, system: string, user: stri
   const text = String(data?.choices?.[0]?.message?.content ?? "").trim();
   const pt = Number(data?.usage?.prompt_tokens ?? 0);
   const ct = Number(data?.usage?.completion_tokens ?? 0);
-  const [inP, outP] = priceOf(model);
   await db.from("fiq_ai_usage").insert({
     product_key: PRODUCT,
     project_id: projectId,
@@ -240,7 +273,8 @@ async function ask(projectId: string, action: string, system: string, user: stri
     model,
     prompt_tokens: pt,
     completion_tokens: ct,
-    cost_usd: +((pt / 1e6) * inP + (ct / 1e6) * outP).toFixed(6),
+    cost_usd: costUsd(model, data?.usage as Usage),
+    ...(() => { const x = usageParts(data?.usage as Usage); return { cache_hit_tokens: x.hit, cache_miss_tokens: x.miss, peak: x.peak }; })(),
   });
   return text || null;
 }
@@ -728,7 +762,9 @@ async function qualify(projectId: string, cfg: Cfg, kb: string, cands: Cand[]) {
   const system =
     "Jesteś analitykiem sprzedaży B2B. Oceniasz, czy dany podmiot pasuje jako klient firmy opisanej w bazie wiedzy. " +
     "Odpowiadasz WYŁĄCZNIE tablicą JSON, bez komentarza. Piszesz po polsku.";
-  const user = `BAZA WIEDZY FIRMY (co sprzedajemy):
+  const systemFull = system + `
+
+BAZA WIEDZY FIRMY (co sprzedajemy):
 ${kb || "(brak — oceniaj po profilu idealnego klienta)"}
 
 PROFIL IDEALNEGO KLIENTA:
@@ -737,9 +773,8 @@ stanowiska: ${cfg.icp.titles || "(dowolne)"}
 lokalizacja: ${cfg.icp.location || "(dowolna)"}
 wielkość firmy: ${cfg.icp.company_size || "(dowolna)"}
 słowa kluczowe: ${cfg.icp.keywords || "-"}
-wyklucz: ${cfg.icp.exclude || "-"}
-
-KANDYDACI:
+wyklucz: ${cfg.icp.exclude || "-"}`;
+  const user = `KANDYDACI:
 ${list}
 
 Zasady oceny:
@@ -757,7 +792,7 @@ Zwróć tablicę dla WSZYSTKICH kandydatów, w tej samej kolejności.`;
   // i oceny — gdy model dostawał jedno pole, wpisywał w nie cechy z profilu klienta, których
   // o kandydacie nie wiedział („organizuje integracje dla pracowników").
   const parsed = parseJson<Array<{ i: number; score: number; industry?: string; why?: string; fakty?: string; ocena?: string }>>(
-    await ask(projectId, "qualify", system, user, 1600, 0.2),
+    await ask(projectId, "qualify", systemFull, user, 1600, 0.2),
   );
   return (parsed ?? []).map((r) => ({
     ...r,
@@ -786,7 +821,11 @@ async function draftMessage(projectId: string, cfg: Cfg, kb: string, lead: Recor
   const channel = channelOf(lead);
   const who = await senderIdentity(projectId, cfg, channel);
   const signature = cfg.tone.signature || [who.name, who.company].filter(Boolean).join(", ");
-  const intro = who.name && who.company
+  const id = (cfg.identity ?? {}) as Record<string, string>;
+  const custom = String((channel === "linkedin" ? id.intro_linkedin : id.intro_email) ?? "").trim();
+  const intro = custom
+    ? custom.replace(/\{imie\}/gi, who.name).replace(/\{firma\}/gi, who.company)
+    : who.name && who.company
     ? `Nazywam się ${who.name} i piszę z ${who.company}.`
     : who.company ? `Piszę z ${who.company}.` : "(nie przedstawiaj się z nazwiska — nie znasz go)";
   if (cfg.tone.template) {
@@ -803,6 +842,7 @@ async function draftMessage(projectId: string, cfg: Cfg, kb: string, lead: Recor
   const form = cfg.tone.form === "pan" ? "formę grzecznościową (Pan/Pani)" : "formę bezpośrednią (na Ty)";
   const maxChars = channel === "linkedin" ? Math.min(cfg.tone.max_chars, LI_INVITE_MAX) : cfg.tone.max_chars;
   const L = await lessons(projectId);
+  const weak = isWeakModel(await currentModel());
   const system = L.top +
     `Jesteś ${who.name || "przedstawicielem"} z firmy ${who.company || "(firma z bazy wiedzy)"}. ` +
     `Piszesz pierwszą wiadomość sprzedażową ${channel === "linkedin" ? "jako notatkę do zaproszenia na LinkedIn" : "jako e-mail"}. Po polsku, ${form}. ` +
@@ -815,11 +855,10 @@ async function draftMessage(projectId: string, cfg: Cfg, kb: string, lead: Recor
     (channel === "email"
       ? "Pierwsza linia odpowiedzi to „TEMAT: <temat maila, 3-7 słów, bez clickbaitu>”, potem pusta linia i treść, na końcu podpis. "
       : "Zwracasz wyłącznie treść notatki, bez tematu i BEZ podpisu — odbiorca widzi Twój profil. To krótka notatka: dokładnie 3 zdania po maksymalnie 15 słów (konkret o odbiorcy · przedstawienie · korzyść zakończona pytaniem). ") +
-    "Bez cudzysłowów wokół treści." + L.tail;
-  const user = `CO SPRZEDAJEMY (baza wiedzy):
-${kb || "(brak)"}
-
-ODBIORCA:
+    "Bez cudzysłowów wokół treści." + L.tail +
+    // baza wiedzy w system prompcie: stały prefiks między leadami → DeepSeek liczy go jako cache hit (50× taniej)
+    `\n\nCO SPRZEDAJEMY (baza wiedzy):\n${kb || "(brak)"}`;
+  const user = `ODBIORCA:
 imię i nazwisko: ${lead.full_name || "NIEZNANE — nie wymyślaj imienia"}
 stanowisko: ${lead.title || lead.headline || "-"}
 firma: ${lead.company ?? "-"}
@@ -833,7 +872,7 @@ ${channel === "email" ? `Podpisz się dokładnie tak: ${signature}` : "Bez podpi
   const raw = await ask(projectId, "draft", system, user, channel === "linkedin" ? 300 : 520);
   if (!raw) return null;
   let { subject, text } = splitSubject(raw.replace(/^["„]+|["”]+$/g, ""));
-  text = await enforceLessons(projectId, L, text, channel);
+  if (weak) text = await enforceLessons(projectId, L, text, channel);
   // redaktor mógł oddać tekst z linią TEMAT — zdejmujemy ją ponownie
   if (channel === "email") {
     const again = splitSubject(text);
@@ -847,6 +886,36 @@ ${channel === "email" ? `Podpisz się dokładnie tak: ${signature}` : "Bez podpi
     // notatka do zaproszenia: LinkedIn odrzuca dłuższe, a cięcie w pół zdania wygląda jak awaria —
     // zdejmujemy podpis, jeśli model go dopisał, i tniemy na końcu ostatniego pełnego zdania
     text = text.replace(new RegExp(`\\s*${signature.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`), "").trim();
+    // model podpisuje się też własnymi wariantami („Mariusz Miękoś, kierowca wyścigowy…") — zdejmujemy
+    // każdą KOŃCOWĄ linię zaczynającą się od imienia i nazwiska, byle nie było to zdanie przedstawienia
+    if (who.name) {
+      const lines = text.split(/\n+/);
+      while (lines.length > 1 && lines[lines.length - 1].trim().startsWith(who.name) && !lines[lines.length - 1].includes(intro)) lines.pop();
+      text = lines.join("\n").trim();
+    }
+    if (weak && !/\?\s*$/.test(text)) {
+      // bez pytania na końcu notatka jest ślepa — dopisujemy je osobnym, krótkim wywołaniem
+      // (z instrukcjami właściciela: on decyduje, JAKIE pytania wolno zadać)
+      const q = await ask(
+        projectId,
+        "draft",
+        // bez L.tail: lista kontrolna „popraw tekst" sprawiała, że model oddawał całą notatkę zamiast pytania
+        L.top + "Dopisz na końcu tej notatki JEDNO krótkie pytanie (do 10 słów), naturalne, na które łatwo odpowiedzieć „tak”, zgodne z instrukcjami powyżej. Zwróć TYLKO to pytanie, nic więcej.",
+        text,
+        60,
+        0.3,
+      );
+      let qq = (q ?? "").split(/\n/).map((l) => l.trim()).filter(Boolean).pop() ?? "";
+      qq = qq.replace(/^(pytanie|odpowiedź)\s*:\s*/i, "").replace(/^["„]+|["”]+$/g, "").trim();
+      if (qq && !/\?$/.test(qq) && /^(czy|jak|co|kiedy|gdzie|ile|chcesz|masz|widzisz|macie|widzicie|zainteres)/i.test(qq)) qq += "?";
+      if (qq && /\?$/.test(qq) && qq.length <= 100) text = `${text.trim()} ${qq}`;
+      // ostatnia deska: pytanie otwarte, bez „czy organizujecie wkrótce" (właściciel tego nie chce)
+      if (!/\?\s*$/.test(text)) {
+        for (const fb of ["Widzisz u siebie miejsce na coś takiego w najbliższym czasie?", "Widzisz u siebie miejsce na coś takiego?"]) {
+          if (text.length + 1 + fb.length <= LI_INVITE_MAX) { text = `${text.trim()} ${fb}`; break; }
+        }
+      }
+    }
     if (text.length > LI_INVITE_MAX) {
       // model 9B nie liczy znaków — zamiast ucinać (ginęło pytanie na końcu) prosimy o skrót
       const shorter = await ask(
@@ -899,12 +968,12 @@ async function replyMessage(projectId: string, cfg: Cfg, lead: Record<string, un
       "Nie witasz się i nie przedstawiasz ponownie — rozmowa już trwa. Nie komentujesz własnych wcześniejszych wiadomości i nie pytasz o nie. Liczby (osoby, dni, ceny) podajesz tylko takie, jakie są w bazie wiedzy; bez nich mówisz, że ustalicie to w rozmowie. " +
       "Jeśli rozmówca odmawia — dziękujesz i kończysz. Jeśli pyta o cenę, której nie ma w bazie wiedzy — mówisz, że wycena zależy od liczby osób i zakresu, i proponujesz rozmowę. " +
       "Źródłem prawdy jest wyłącznie blok CO SPRZEDAJEMY: jeśli wcześniej w rozmowie padło coś, czego tam już nie ma (oferta mogła się zmienić), mówisz wprost, że oferta została zaktualizowana, i podajesz stan aktualny. " +
-      "Bez markdown i emoji. Zwracasz wyłącznie treść odpowiedzi." + L.tail,
-    `CO SPRZEDAJEMY:\n${kb}\n\nROZMOWA (MY = ${who.name || "my"}, ON = rozmówca):\n${convo}`,
+      "Bez markdown i emoji. Zwracasz wyłącznie treść odpowiedzi." + L.tail + `\n\nCO SPRZEDAJEMY:\n${kb}`,
+    `ROZMOWA (MY = ${who.name || "my"}, ON = rozmówca):\n${convo}`,
     360,
   );
   if (!reply) return reply;
-  const checked = await enforceLessons(projectId, L, reply, "reply");
+  const checked = isWeakModel(await currentModel()) ? await enforceLessons(projectId, L, reply, "reply") : reply;
   // w trwającej rozmowie nie ma powitania — model (i redaktor ze wskazówką „tylko Cześć") i tak je dopisywał
   const noHello = checked.replace(/^\s*(cześć|hej|dzień dobry|witaj|witam)(\s+[^,\n!.]{0,30})?[,!.]?\s*/i, "").trim();
   return noHello.charAt(0).toUpperCase() + noHello.slice(1);
