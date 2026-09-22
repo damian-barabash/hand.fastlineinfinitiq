@@ -279,6 +279,21 @@ async function ask(projectId: string, action: string, system: string, user: stri
   return text || null;
 }
 
+// Odpowiedź ucięta limitem tokenów: tablica bez „]" — bierzemy wszystkie KOMPLETNE obiekty,
+// zamiast wyrzucać całą partię (20 leadów po 50 bez uzasadnienia — 22.09).
+function salvageArray<T>(text: string): T[] {
+  const out: T[] = [];
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) { if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === "{") { if (depth === 0) start = i; depth++; }
+    else if (ch === "}") { depth--; if (depth === 0 && start >= 0) { try { out.push(JSON.parse(text.slice(start, i + 1)) as T); } catch { /* niepełny */ } start = -1; } }
+  }
+  return out;
+}
+
 // Model bywa gadatliwy — wyłuskujemy pierwszy poprawny JSON z odpowiedzi.
 function parseJson<T>(text: string | null): T | null {
   if (!text) return null;
@@ -817,14 +832,39 @@ Zwróć tablicę dla WSZYSTKICH kandydatów, w tej samej kolejności.`;
   // niska temperatura: ocena ma być powtarzalna, nie kreatywna. „why" składa kod z faktów
   // i oceny — gdy model dostawał jedno pole, wpisywał w nie cechy z profilu klienta, których
   // o kandydacie nie wiedział („organizuje integracje dla pracowników").
-  const parsed = parseJson<Array<{ i: number; score: number; industry?: string; why?: string; fakty?: string; ocena?: string }>>(
-    await ask(projectId, "qualify", systemFull, user, 1600, 0.2),
-  );
+  // Limit tokenów rośnie z liczbą kandydatów (~220 na osobę) — 20 kandydatów w 1600 tokenach
+  // ucinało JSON i cała partia dostawała 50 bez uzasadnienia.
+  type Q = { i: number; score: number; industry?: string; why?: string; fakty?: string; ocena?: string };
+  const raw = await ask(projectId, "qualify", systemFull, user, Math.min(6000, Math.max(900, cands.length * 220)), 0.2);
+  let parsed = parseJson<Q[]>(raw);
+  if ((!parsed || !Array.isArray(parsed)) && raw) {
+    parsed = salvageArray<Q>(raw);
+    console.error(`qualify: JSON niepełny, uratowano ${parsed.length}/${cands.length}`);
+  }
   return (parsed ?? []).map((r) => ({
     ...r,
-    why: r.fakty || r.ocena ? [r.fakty, r.ocena].filter(Boolean).join(" — ") : r.why,
+    // fakty kończą się kropką, ocena zaczyna wielką literą — jedno zdanie, potem drugie
+    why: r.fakty || r.ocena
+      ? [String(r.fakty ?? "").trim().replace(/[.,;:]+$/, ""), String(r.ocena ?? "").trim().replace(/^./, (c) => c.toUpperCase())].filter(Boolean).join(". ").replace(/\.$/, "") + "."
+      : r.why,
   }));
 }
+
+// Kwalifikacja w partiach: jedno wywołanie na ≤8 kandydatów — krótsza odpowiedź, mniejsze ryzyko
+// ucięcia, a przy padnięciu jednej partii reszta ma oceny.
+async function qualifyAll(projectId: string, cfg: Cfg, kb: string, cands: Cand[]) {
+  const out = new Map<number, { score: number; industry?: string; why?: string }>();
+  for (let from = 0; from < cands.length; from += 8) {
+    const part = cands.slice(from, from + 8);
+    const scores = await qualify(projectId, cfg, kb, part);
+    for (const sc of scores) {
+      const idx = from + Number(sc.i);
+      if (Number.isFinite(idx) && idx >= from && idx < from + part.length) out.set(idx, sc);
+    }
+  }
+  return out;
+}
+const NO_SCORE_WHY = "Kwalifikacja nie powiodła się (model nie ocenił tego kandydata), oceń ręcznie albo kliknij „Oceń ponownie”.";
 
 // ── pierwsza wiadomość ──────────────────────────────────────────────────────
 // Kanał wynika z leada: profil LinkedIn → zaproszenie z notatką, inaczej e-mail.
@@ -1215,18 +1255,18 @@ async function doSearch(projectId: string, source: string, queries: string[], li
     if (source !== "linkedin") await enrichAll(fresh, Date.now() + 45_000);
 
     const kb = await knowledge(projectId);
-    const scores = await qualify(projectId, cfg, kb, fresh);
-    const byIdx = new Map(scores.map((s) => [Number(s.i), s]));
+    const byIdx = await qualifyAll(projectId, cfg, kb, fresh);
 
     const rows = fresh.map((c, i) => {
       const s = byIdx.get(i);
-      const score = Math.max(0, Math.min(100, Number(s?.score ?? 50)));
+      // brak oceny = do akceptacji z jawnym powodem, nigdy „50 bez słowa"
+      const score = s ? Math.max(0, Math.min(100, Number(s.score ?? 0))) : 0;
       return {
         project_id: projectId,
         source: c.source,
         // próg decyduje: powyżej — do wysyłki, poniżej — do ręcznej akceptacji;
         // bez kanału kontaktu zawsze do akceptacji (ktoś musi dopisać mail)
-        status: score >= cfg.score_threshold && reachable(c, cfg) ? "ready" : "review",
+        status: s && score >= cfg.score_threshold && reachable(c, cfg) ? "ready" : "review",
         full_name: c.full_name ?? "",
         headline: c.headline ?? "",
         company: c.company ?? "",
@@ -1239,8 +1279,8 @@ async function doSearch(projectId: string, source: string, queries: string[], li
         email: c.email ?? "",
         phone: c.phone ?? "",
         score,
-        why: s?.why ?? "",
-        meta: { ...(c.meta ?? {}), ...(campaignId ? { campaign_id: campaignId } : {}) },
+        why: s?.why || NO_SCORE_WHY,
+        meta: { ...(c.meta ?? {}), ...(campaignId ? { campaign_id: campaignId } : {}), ...(s ? {} : { unscored: true }) },
       };
     });
     let added = 0;
@@ -1575,6 +1615,38 @@ serve(async (req) => {
       }
       // „Wyślij do nowych": jedna partia do leadów gotowych (do 10 na klik, w limicie dziennym; godziny pracy
       // nie obowiązują — to świadoma decyzja człowieka). Przycisk pokazuje, ile zostało, i można kliknąć znów.
+      // „Oceń ponownie": ta sama kwalifikacja dla leadów, które oceny nie dostały (albo wskazanych id)
+      case "leads.requalify": {
+        const pid = String(body.project_id ?? "");
+        await assertProject(user, pid);
+        const cfg = await loadCfg(pid);
+        let q = db.from("hand_leads").select("*").eq("project_id", pid).in("status", ["review", "ready"]);
+        if (Array.isArray(body.ids) && body.ids.length) q = q.in("id", (body.ids as string[]).slice(0, 80));
+        else q = q.or(`why.eq.,why.eq.${NO_SCORE_WHY},meta->>unscored.eq.true`);
+        const { data: leads } = await q.limit(80);
+        if (!leads?.length) return J({ ok: true, scored: 0 });
+        const cands: Cand[] = leads.map((l) => ({
+          source: l.source, full_name: l.full_name, headline: l.headline, company: l.company, title: l.title,
+          location: l.location, li_urn: l.li_urn, website: l.website, email: l.email, meta: l.meta ?? {},
+        }));
+        const byIdx = await qualifyAll(pid, cfg, await knowledge(pid), cands);
+        let scored = 0;
+        for (let i = 0; i < leads.length; i++) {
+          const sc = byIdx.get(i);
+          if (!sc) continue;
+          const score = Math.max(0, Math.min(100, Number(sc.score ?? 0)));
+          await db.from("hand_leads").update({
+            score,
+            industry: sc.industry ?? leads[i].industry,
+            why: sc.why || "",
+            status: leads[i].status === "ready" ? "ready" : score >= cfg.score_threshold && reachable(cands[i], cfg) ? "ready" : "review",
+            meta: { ...(leads[i].meta ?? {}), unscored: false },
+            updated_at: new Date().toISOString(),
+          }).eq("id", leads[i].id);
+          scored++;
+        }
+        return J({ ok: true, scored, total: leads.length });
+      }
       case "leads.sendNew": {
         const pid = String(body.project_id ?? "");
         await assertProject(user, pid);

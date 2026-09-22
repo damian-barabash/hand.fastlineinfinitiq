@@ -14,6 +14,7 @@ import {
   IcMail,
   IcPhone,
   IcEye,
+  IcSpark,
 } from '../shared/Icons.jsx'
 import { SkelCard } from '../shared/Skeleton.jsx'
 
@@ -49,6 +50,22 @@ export default function Leads() {
   const [err, setErr] = useState('')
   const [sendInfo, setSendInfo] = useState(null)
   const readyCount = (leads ?? []).filter((l) => l.status === 'ready').length
+  // leady bez oceny (model nie odpowiedział albo odpowiedź była ucięta) — da się ocenić ponownie jednym klikiem
+  const unscored = (leads ?? []).filter((l) => ['review', 'ready'].includes(l.status) && (!l.why || l.meta?.unscored || /Kwalifikacja nie powiodła się/.test(l.why))).length
+  const [reqInfo, setReqInfo] = useState(null)
+  async function requalify() {
+    setBusy('requalify')
+    setErr('')
+    try {
+      const d = await hand('leads.requalify', { project_id: proj.id })
+      setReqInfo(d)
+      await load()
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setBusy('')
+    }
+  }
 
   // jedna partia do wszystkich gotowych, do których agent jeszcze nie pisał (do 10 na klik, w limicie dziennym)
   async function sendNew() {
@@ -139,7 +156,12 @@ export default function Leads() {
             Wynik 0–100 wystawia model, porównując kandydata z profilem klienta i bazą wiedzy. Obok masz powód tej oceny.
           </p>
         </div>
-        <div className="row" style={{ gap: 8 }}>
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          {unscored > 0 && (
+            <button className="btn" onClick={requalify} disabled={busy === 'requalify'} title="Model ocenia jeszcze raz leady bez oceny (partiami po 8)">
+              <IcSpark /> {busy === 'requalify' ? 'Oceniam…' : `Oceń ponownie (${unscored} bez oceny)`}
+            </button>
+          )}
           <button className="btn primary" onClick={sendNew} disabled={busy === 'sendNew' || !readyCount} title="Pierwsza wiadomość do wszystkich gotowych, do których agent jeszcze nie pisał">
             <IcSend /> {busy === 'sendNew' ? 'Wysyłam…' : `Wyślij do nowych${readyCount ? ` (${readyCount})` : ''}`}
           </button>
@@ -148,6 +170,11 @@ export default function Leads() {
           </button>
         </div>
       </div>
+      {reqInfo && (
+        <div className="note" style={{ marginBottom: 14 }}>
+          Oceniono ponownie {reqInfo.scored} z {reqInfo.total ?? reqInfo.scored}.
+        </div>
+      )}
       {sendInfo && (
         <div className="note" style={{ marginBottom: 14 }}>
           Wysłano {sendInfo.sent}{sendInfo.failed ? `, nie udało się ${sendInfo.failed} (powód przy leadzie)` : ''}.
