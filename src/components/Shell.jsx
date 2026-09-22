@@ -22,6 +22,8 @@ import {
   IcSpark,
 } from '../shared/Icons.jsx'
 import { SkelPage } from '../shared/Skeleton.jsx'
+import UserBadge from '../shared/UserBadge.jsx'
+import { refreshMe } from '../shared/platform.js'
 
 const Dashboard = lazy(() => import('../pages/Dashboard.jsx'))
 const Search = lazy(() => import('../pages/Search.jsx'))
@@ -38,6 +40,14 @@ export default function Shell() {
   const [open, setOpen] = useState(window.innerWidth > 900)
   const [theme, setThemeState] = useState(getTheme())
   const user = session.user
+  const [me, setMe] = useState(user)
+  useEffect(() => {
+    let alive = true
+    refreshMe().then((u) => alive && u && setMe({ ...(session.user || {}), ...u }))
+    return () => {
+      alive = false
+    }
+  }, [])
   const ws = session.ws
   const proj = session.proj
   // Nazwa produktu pochodzi z rejestru platformy — panel nie może pokazywać
@@ -182,7 +192,11 @@ export default function Shell() {
           </button>
         </div>
       </aside>
-      <main className="main">
+      <main className="main has-topbar">
+        {/* kto jest zalogowany — zawsze w prawym górnym rogu, w każdym produkcie platformy */}
+        <div className="topbar">
+          <UserBadge user={me} />
+        </div>
         <Suspense fallback={<SkelPage stats={4} cards={2} />}>
           <Routes>
             <Route path="dashboard" element={<Dashboard />} />
