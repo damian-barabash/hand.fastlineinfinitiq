@@ -44,6 +44,19 @@
   flex: 1;
   overflow: auto;
 }
+/* data pod wiadomością: .mono ma kolor przygaszony (--dim), który na pomarańczowym
+   dymku wychodzącej wiadomości ginął zupełnie — meta bierze kolor z dymka */
+.msg .msg-meta {
+  font-size: 10.5px;
+  margin-top: 6px;
+  color: inherit;
+  opacity: 0.72;
+}
+.msg.user .msg-meta {
+  color: var(--acid-ink);
+  opacity: 0.8;
+  font-weight: 500;
+}
 /* wiersz integracji — ikona, opis, status po prawej */
 .int-row {
   gap: 12px;

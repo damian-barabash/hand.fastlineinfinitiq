@@ -43,6 +43,8 @@ export default function Leads() {
   const [leads, setLeads] = useState(null)
   const [open, setOpen] = useState(null)
   const [draft, setDraft] = useState(null)
+  const [subject, setSubject] = useState('')
+  const [channel, setChannel] = useState('')
   const [busy, setBusy] = useState('')
   const [err, setErr] = useState('')
 
@@ -88,6 +90,8 @@ export default function Leads() {
     try {
       const d = await hand('lead.draft', { id: lead.id })
       setDraft(d.text)
+      setSubject(d.subject || '')
+      setChannel(d.channel || '')
     } catch (e) {
       setErr(e.message)
     }
@@ -97,7 +101,7 @@ export default function Leads() {
     setBusy(lead.id + 'send')
     setErr('')
     try {
-      await hand('message.send', { lead_id: lead.id, content: text })
+      await hand('message.send', { lead_id: lead.id, content: text, subject: channel === 'email' ? subject : '' })
       setOpen(null)
       await load()
     } catch (e) {
@@ -169,7 +173,7 @@ export default function Leads() {
                 </div>
                 <div style={{ textAlign: 'right', flexShrink: 0 }}>
                   <div className="display" style={{ fontSize: 24, color: 'var(--acid)' }}>{Math.round(l.score)}</div>
-                  <span className="mono" style={{ fontSize: 10, color: 'var(--dim2)' }}>/100</span>
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--dim)' }}>/100</span>
                 </div>
               </div>
               {l.why && (
@@ -233,6 +237,12 @@ export default function Leads() {
             {draft === null && !err && <p className="muted">Model układa wiadomość…</p>}
             {draft !== null && (
               <>
+                {channel === 'email' && (
+                  <label className="f">
+                    <span className="mono">Temat maila</span>
+                    <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Krótkie pytanie" />
+                  </label>
+                )}
                 <label className="f">
                   <span className="mono">Treść (możesz poprawić przed wysłaniem)</span>
                   <textarea rows={7} value={draft} onChange={(e) => setDraft(e.target.value)} />
@@ -250,7 +260,10 @@ export default function Leads() {
                   </button>
                 </div>
                 <p className="chart-tip" style={{ marginTop: 10 }}>
-                  Wysyłka idzie tym kanałem, którym da się dotrzeć: LinkedIn, jeśli lead ma profil, w innym razie e-mail.
+                  {channel === 'linkedin'
+                    ? 'Pójdzie jako notatka do zaproszenia na LinkedIn (limit 280 znaków), z konta podłączonego do projektu.'
+                    : 'Pójdzie e-mailem ze wspólnej skrzynki projektu (Integracje), odpowiedzi trafią na adres reply-to.'}{' '}
+                  Ton i sposób przedstawiania się poprawisz w zakładce „Test rozmowy".
                 </p>
               </>
             )}

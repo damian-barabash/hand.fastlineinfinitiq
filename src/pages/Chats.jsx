@@ -125,7 +125,7 @@ export default function Chats() {
                   return (
                     <div key={m.id} className={'msg ' + (m.direction === 'out' ? 'user' : 'ai')}>
                       <div>{m.content}</div>
-                      <div className="mono" style={{ fontSize: 10, opacity: 0.6, marginTop: 6 }}>
+                      <div className="mono msg-meta">
                         <Ic style={{ width: 10, height: 10, verticalAlign: '-1px', marginRight: 5 }} />
                         {new Date(m.created_at).toLocaleString('pl-PL')}
                         {m.status === 'invited' && ' · zaproszenie'}

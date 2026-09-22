@@ -53,7 +53,16 @@ const DEFAULT_CONFIG = {
   limits: { invites_per_day: 40, messages_per_day: 80, hours: [8, 19], days: [1, 2, 3, 4, 5, 6] },
   tone: { form: "ty", language: "pl", signature: "", max_chars: 400, template: "" },
   email: { enabled: true, from: "", subject: "" },
+  // Kim agent jest dla odbiorcy. Na LinkedInie ZAWSZE właściciel podłączonego
+  // konta (to jego profil — nie da się pisać jako ktoś inny). W e-mailu `name`
+  // to osoba, która się podpisuje (puste = nazwa nadawcy skrzynki). Firma to
+  // marka, którą się przedstawia — nazwa projektu („FRA b2b") do tego się nie nadaje.
+  identity: { name: "", company: "" },
 };
+
+// Notatka do zaproszenia LinkedIn ma twardy limit u LinkedIna (300 znaków) —
+// dłuższy tekst i tak byśmy ucięli w pół zdania.
+const LI_INVITE_MAX = 280;
 
 type Cfg = typeof DEFAULT_CONFIG & Record<string, unknown>;
 
@@ -182,7 +191,7 @@ function providerConfig(ai: AiCfg) {
 }
 
 // Jedno wywołanie modelu + zapis kosztu. Zwraca surowy tekst albo null.
-async function ask(projectId: string, action: string, system: string, user: string, maxTokens = 700) {
+async function ask(projectId: string, action: string, system: string, user: string, maxTokens = 700, temperature?: number) {
   const ai = await aiConfig();
   const { baseUrl, apiKey, model } = providerConfig(ai);
   if (!baseUrl || !apiKey) {
@@ -198,7 +207,7 @@ async function ask(projectId: string, action: string, system: string, user: stri
       body: JSON.stringify({
         model,
         stream: false,
-        temperature: ai.temperature ?? 0.5,
+        temperature: temperature ?? ai.temperature ?? 0.5,
         max_tokens: maxTokens,
         messages: [{ role: "system", content: system }, { role: "user", content: user }],
       }),
@@ -254,23 +263,86 @@ function parseJson<T>(text: string | null): T | null {
 }
 
 // ── baza wiedzy projektu (wspólna z Brain) ──────────────────────────────────
-async function knowledge(projectId: string, cap = 6000) {
+// Strona WWW zapisana do wiedzy zaczyna się od menu („Przejdź do treści Koszyk
+// 0,00 zł O nas Oferta…") — przy cięciu do 800 znaków model dostawał SAMO menu
+// i nic o ofercie. Tniemy więc wstęp do pierwszego prawdziwego zdania.
+function dropNav(text: string) {
+  const m = text.match(/(?:^|[.!?…]\s+)([A-ZĄĆĘŁŃÓŚŹŻ][^.!?]{50,}[.!?])/);
+  if (!m || m.index === undefined) return text;
+  const start = m.index + m[0].length - m[1].length;
+  return start > 120 ? text.slice(start) : text;
+}
+
+async function knowledge(projectId: string, cap = 7000) {
   const { data: items } = await db
     .from("brain_kb_items").select("type, title, content, url").eq("project_id", projectId).order("sort").limit(40);
   const { data: prods } = await db
     .from("brain_products").select("name, description, manual_notes, price, price_currency").eq("project_id", projectId).order("sort").limit(20);
   const parts: string[] = [];
-  for (const it of items ?? []) {
-    const body = String(it.content ?? it.url ?? "").slice(0, 800);
-    if (body) parts.push(`[${it.type}] ${it.title ?? ""}: ${body}`);
-  }
+  // opis produktu jest już streszczeniem jego źródeł — idzie pierwszy i w całości
   for (const p of prods ?? []) {
     parts.push(
-      `[produkt] ${p.name}: ${String(p.description ?? "").slice(0, 400)}${p.manual_notes ? ` | ${String(p.manual_notes).slice(0, 200)}` : ""}` +
+      `[produkt] ${p.name}: ${String(p.description ?? "").slice(0, 1200)}${p.manual_notes ? ` | Od właściciela: ${String(p.manual_notes).slice(0, 400)}` : ""}` +
         (p.price ? ` (od ${p.price} ${p.price_currency ?? "PLN"})` : ""),
     );
   }
+  const seen = new Set<string>();
+  for (const it of items ?? []) {
+    let body = String(it.content ?? it.url ?? "").replace(/\s+/g, " ").trim();
+    if (!body) continue;
+    // ta sama strona dodana dwa razy (do firmy i do produktu) nie ma zajmować miejsca dwa razy
+    const key = body.slice(0, 300);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (it.type === "url") body = dropNav(body);
+    parts.push(`[${it.type}] ${it.title ?? ""}: ${body.slice(0, 2200)}`);
+  }
   return parts.join("\n").slice(0, cap);
+}
+
+// ── wskazówki trenera (poprawki z testowego czatu) ───────────────────────────
+// Ten sam mechanizm co u doradcy i sprzedawcy w Brain (brain_feedback), osobny
+// scope — uwaga dobra dla Łowcy („nie pytaj o budżet w pierwszej wiadomości")
+// nie ma nic wspólnego z doradcą na czacie.
+async function lessons(projectId: string) {
+  const { data } = await db
+    .from("brain_feedback").select("note, corrected").eq("project_id", projectId).eq("scope", "hand")
+    .eq("status", "approved").order("created_at", { ascending: false }).limit(12);
+  const rows = (data ?? []) as { note: string; corrected: string }[];
+  if (!rows.length) return "";
+  return "\nSTAŁE WSKAZÓWKI TRENERA (stosuj zawsze, gdy pasują):\n" +
+    rows.map((r, i) => `${i + 1}. ${String(r.note).slice(0, 300)}${r.corrected ? ` (wzór: ${String(r.corrected).slice(0, 300)})` : ""}`)
+      .join("\n") + "\n";
+}
+
+// ── kim agent jest dla odbiorcy ──────────────────────────────────────────────
+// Wiadomość bez „kto pisze" wygląda jak spam, a z wymyślonym nazwiskiem — jak
+// oszustwo. Nazwisko bierzemy z konta, z którego wiadomość naprawdę wychodzi.
+type Identity = { name: string; company: string; email: string };
+
+async function senderIdentity(projectId: string, cfg: Cfg, channel: "linkedin" | "email"): Promise<Identity> {
+  const id = (cfg.identity ?? { name: "", company: "" }) as { name?: string; company?: string };
+  let name = "";
+  let email = "";
+  if (channel === "linkedin") {
+    if (cfg.unipile_account_id) {
+      const { data } = await db.from("fiq_project_accounts").select("account_name").eq("account_id", cfg.unipile_account_id).maybeSingle();
+      name = String(data?.account_name ?? "").trim();
+    }
+  } else {
+    name = String(id.name ?? "").trim();
+    const mail = await projectEmail(projectId);
+    const own = String(cfg.email.from || "").trim(); // „Imię <adres>" albo sam adres
+    const m = own.match(/^(.*?)\s*<([^>]+)>$/);
+    email = (m ? m[2] : own) || String(mail.from_email ?? "");
+    if (!name) name = (m ? m[1].trim() : "") || String(mail.from_name ?? "").trim();
+  }
+  let company = String(id.company ?? "").trim();
+  if (!company) {
+    const { data } = await db.from("brain_projects").select("name").eq("id", projectId).maybeSingle();
+    company = String(data?.name ?? "").trim();
+  }
+  return { name, company, email };
 }
 
 // ── realny stan integracji ──────────────────────────────────────────────────
@@ -437,11 +509,22 @@ async function searchMaps(query: string, limit: number): Promise<Cand[]> {
     company: String((p.displayName as Record<string, unknown> | undefined)?.text ?? ""),
     location: String(p.formattedAddress ?? ""),
     phone: String(p.nationalPhoneNumber ?? ""),
-    website: String(p.websiteUri ?? ""),
+    website: cleanSite(String(p.websiteUri ?? "")),
     headline: String((p.primaryTypeDisplayName as Record<string, unknown> | undefined)?.text ?? ""),
     meta: { rating: p.rating ?? null, reviews: p.userRatingCount ?? null, maps_url: p.googleMapsUri ?? "" },
   }));
 }
+
+// adres strony bez parametrów śledzących (utm z wizytówki Google) — inaczej ta sama
+// firma z dwóch źródeł wygląda jak dwie różne i dedup po stronie nie działa
+const cleanSite = (u: string) => {
+  try {
+    const x = new URL(u);
+    return `${x.protocol}//${x.host}${x.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return u;
+  }
+};
 
 const stripHtml = (h: string) =>
   h.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ")
@@ -574,7 +657,11 @@ async function enrichFromSite(c: Cand, deadline: number) {
   const mail = [...html.matchAll(/mailto:([^"'?\s>]+)/gi)].map((m) => m[1])
     .concat([...html.matchAll(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi)].map((m) => m[0]))
     .find((m) => !BAD_MAIL.test(m));
-  if (mail && !c.email) c.email = decodeURIComponent(mail).toLowerCase().slice(0, 120);
+  if (mail && !c.email) {
+    // z „mailto:" potrafi wyjść adres strony albo śmieć z parametrów — do bazy trafia tylko poprawny adres
+    const addr = decodeURIComponent(mail).toLowerCase().trim().slice(0, 120);
+    if (/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/.test(addr)) c.email = addr;
+  }
   if (!c.phone) {
     const tel = html.match(/(?:tel:|telefon[^0-9+]{0,12})(\+?48[\s-]?)?((?:\d[\s-]?){9})/i);
     if (tel) c.phone = (tel[0].replace(/^[^+0-9]*/, "")).replace(/\s+/g, " ").slice(0, 24);
@@ -596,10 +683,12 @@ async function enrichAll(cands: Cand[], deadline: number) {
 async function qualify(projectId: string, cfg: Cfg, kb: string, cands: Cand[]) {
   if (!cands.length) return [];
   const list = cands
-    .map((c, i) =>
-      `${i}. ${[c.full_name, c.title, c.company, c.headline, c.location, c.website, c.email ? "mail: " + c.email : ""]
-        .filter(Boolean).join(" | ")}`
-    )
+    .map((c, i) => {
+      const m = (c.meta ?? {}) as Record<string, unknown>;
+      const maps = c.source === "maps" && m.rating ? `Google: ${m.rating}★ (${m.reviews ?? 0} opinii)` : "";
+      return `${i}. ${[c.full_name, c.title, c.company, c.headline, c.location, c.website, maps, c.email ? "mail: " + c.email : "bez maila"]
+        .filter(Boolean).join(" | ")}`;
+    })
     .join("\n").slice(0, 8000);
   const system =
     "Jesteś analitykiem sprzedaży B2B. Oceniasz, czy dany podmiot pasuje jako klient firmy opisanej w bazie wiedzy. " +
@@ -618,51 +707,158 @@ wyklucz: ${cfg.icp.exclude || "-"}
 KANDYDACI:
 ${list}
 
-Uwaga: katalogi, porównywarki, rankingi i portale ogłoszeniowe NIE są klientami — daj im score 0.
+Zasady oceny:
+- Oceniasz KAŻDEGO kandydata osobno, po jego własnych danych. Dwa różne podmioty nie mogą dostać identycznego uzasadnienia — w "why" wskaż konkret z tego wiersza (co robi, dla kogo, gdzie, skala).
+- Score 0 tylko dla stron, które NIE są firmą-klientem: katalog firm, porównywarka, ranking („10 najlepszych…"), portal ogłoszeniowy, encyklopedia, blog. Zwykła firma, nawet z ogólną nazwą, to firma — oceń ją normalnie.
+- KONKURENCJA to nie klient: podmiot, który sprzedaje to samo, co my (patrz baza wiedzy), albo pośredniczy w tej samej usłudze (agencja, broker, organizator) — score maksymalnie 20, a w "why" napisz „konkurencja/pośrednik". Klient to ten, kto KUPUJE naszą usługę dla siebie, swoich ludzi albo swoich klientów.
+- Rozróżniaj: 90-100 = dokładnie profil idealnego klienta i widać powód do kontaktu; 70-89 = pasuje, ale bez wyraźnego haka; 40-69 = pasuje częściowo (inna wielkość, inna rola, pośrednik); poniżej 40 = nie pasuje albo wykluczony.
+- Brak maila obniża użyteczność, nie dopasowanie — nie zmieniaj przez to score.
+- NIE przypisuj kandydatowi cech z profilu idealnego klienta, których nie ma w jego wierszu (np. „organizuje integracje" — tego nie wiesz). Gdy dopasowanie wynika tylko z branży i lokalizacji, score najwyżej 80, a w "why" napisz to, co naprawdę widać: co robi, gdzie, jaka skala (opinie Google, opis).
 
 Dla każdego kandydata zwróć obiekt:
-{"i": <numer>, "score": <0-100 dopasowanie>, "industry": "<branża 1-3 słowa>", "why": "<jedno zdanie po polsku: dlaczego pasuje albo dlaczego nie>"}
+{"i": <numer>, "score": <0-100 dopasowanie>, "industry": "<branża 1-3 słowa>", "fakty": "<jedno zdanie: co WIADOMO o kandydacie z jego wiersza — co robi, gdzie, jaka skala; bez domysłów>", "ocena": "<3-8 słów: dlaczego pasuje albo nie>"}
 Zwróć tablicę dla WSZYSTKICH kandydatów, w tej samej kolejności.`;
-  const parsed = parseJson<Array<{ i: number; score: number; industry?: string; why?: string }>>(
-    await ask(projectId, "qualify", system, user, 1400),
+  // niska temperatura: ocena ma być powtarzalna, nie kreatywna. „why" składa kod z faktów
+  // i oceny — gdy model dostawał jedno pole, wpisywał w nie cechy z profilu klienta, których
+  // o kandydacie nie wiedział („organizuje integracje dla pracowników").
+  const parsed = parseJson<Array<{ i: number; score: number; industry?: string; why?: string; fakty?: string; ocena?: string }>>(
+    await ask(projectId, "qualify", system, user, 1600, 0.2),
   );
-  return parsed ?? [];
+  return (parsed ?? []).map((r) => ({
+    ...r,
+    why: r.fakty || r.ocena ? [r.fakty, r.ocena].filter(Boolean).join(" — ") : r.why,
+  }));
 }
 
 // ── pierwsza wiadomość ──────────────────────────────────────────────────────
-async function draftMessage(projectId: string, cfg: Cfg, kb: string, lead: Record<string, unknown>) {
+// Kanał wynika z leada: profil LinkedIn → zaproszenie z notatką, inaczej e-mail.
+const channelOf = (lead: Record<string, unknown>): "linkedin" | "email" => (lead.li_urn ? "linkedin" : "email");
+
+// E-mail dostaje od modelu temat w pierwszej linii („TEMAT: …") — generyczne
+// „Krótkie pytanie" w każdym mailu wygląda jak masówka.
+function splitSubject(text: string) {
+  const m = text.match(/^\s*TEMAT:\s*(.+?)\s*\n+([\s\S]*)$/i);
+  if (!m) return { subject: "", text: text.trim() };
+  return { subject: m[1].replace(/^["„]|["”]$/g, "").trim().slice(0, 120), text: m[2].trim() };
+}
+
+type Draft = { text: string; subject: string; channel: "linkedin" | "email" };
+// model nie zawsze oddaje linię TEMAT — mail bez tematu nie może wyjść
+const defaultSubject = (lead: Record<string, unknown>) =>
+  lead.company ? `Krótkie pytanie do ${String(lead.company).slice(0, 60)}` : "Krótkie pytanie";
+
+async function draftMessage(projectId: string, cfg: Cfg, kb: string, lead: Record<string, unknown>): Promise<Draft | null> {
+  const channel = channelOf(lead);
+  const who = await senderIdentity(projectId, cfg, channel);
+  const signature = cfg.tone.signature || [who.name, who.company].filter(Boolean).join(", ");
+  const intro = who.name && who.company
+    ? `Nazywam się ${who.name} i piszę z ${who.company}.`
+    : who.company ? `Piszę z ${who.company}.` : "(nie przedstawiaj się z nazwiska — nie znasz go)";
   if (cfg.tone.template) {
     // sztywny szablon: tylko podstawienie zmiennych, zero improwizacji
-    return String(cfg.tone.template)
+    const text = String(cfg.tone.template)
       .replace(/\{imie\}/gi, String(lead.full_name ?? "").split(" ")[0] || "")
       .replace(/\{nazwisko\}/gi, String(lead.full_name ?? "").split(" ").slice(1).join(" "))
       .replace(/\{firma\}/gi, String(lead.company ?? ""))
       .replace(/\{miasto\}/gi, String(lead.location ?? ""))
-      .replace(/\{branza\}/gi, String(lead.industry ?? ""));
+      .replace(/\{branza\}/gi, String(lead.industry ?? ""))
+      .replace(/\{podpis\}/gi, signature);
+    return { text, subject: String(cfg.email.subject || ""), channel };
   }
   const form = cfg.tone.form === "pan" ? "formę grzecznościową (Pan/Pani)" : "formę bezpośrednią (na Ty)";
+  const maxChars = channel === "linkedin" ? Math.min(cfg.tone.max_chars, LI_INVITE_MAX) : cfg.tone.max_chars;
   const system =
-    `Piszesz pierwszą wiadomość sprzedażową na LinkedIn/e-mail. Po polsku, ${form}. ` +
-    `Maksymalnie ${cfg.tone.max_chars} znaków. Bez korpo-lania, bez „mam nadzieję, że mail zastaje Pana dobrze". ` +
-    "Zaczynasz od konkretu z profilu odbiorcy, dajesz JEDNĄ korzyść dopasowaną do jego branży, kończysz krótkim pytaniem. " +
-    "NIGDY nie wymyślasz imienia ani nazwiska: jeśli w danych odbiorcy nie ma imienia, zwracasz się do firmy " +
-    "(np. zaczynasz od Dzień dobry, albo od razu od konkretu) i nie używasz żadnego imienia. " +
-    "Nie obiecujesz liczb, których nie ma w bazie wiedzy. " +
-    "Zwracasz wyłącznie treść wiadomości, bez tematu i bez cudzysłowów.";
+    `Jesteś ${who.name || "przedstawicielem"} z firmy ${who.company || "(firma z bazy wiedzy)"}. ` +
+    `Piszesz pierwszą wiadomość sprzedażową ${channel === "linkedin" ? "jako notatkę do zaproszenia na LinkedIn" : "jako e-mail"}. Po polsku, ${form}. ` +
+    `Maksymalnie ${maxChars} znaków treści. Bez korpo-lania, bez „mam nadzieję, że mail zastaje Pana dobrze". ` +
+    "Układ: (1) jedno zdanie z konkretem o odbiorcy, (2) zdanie przedstawienia — DOSŁOWNIE to podane niżej, (3) JEDNA korzyść dopasowana do jego branży, (4) krótkie pytanie na koniec, (5) podpis. " +
+    "Powitanie: jeśli znasz imię odbiorcy — „Cześć <imię>,” (na Ty) albo „Dzień dobry Panie/Pani <imię>,”; jeśli NIE znasz imienia — samo „Dzień dobry,” albo „Cześć,”. " +
+    "NIGDY „Witaj w <nazwa firmy>” ani „Witaj <nazwa firmy>” — tak wita strona internetowa, nie człowiek. " +
+    "NIGDY nie wymyślasz imienia ani nazwiska odbiorcy i nie używasz nazwy firmy jako imienia. " +
+    "Wymieniasz TYLKO atrakcje, samochody, tory, liczby, ceny i terminy, które stoją w bazie wiedzy; jeśli w bazie nie ma listy samochodów, piszesz ogólnie („samochody sportowe z naszej floty”). Nie używasz markdown ani emoji. " +
+    (channel === "email"
+      ? "Pierwsza linia odpowiedzi to „TEMAT: <temat maila, 3-7 słów, bez clickbaitu>”, potem pusta linia i treść, na końcu podpis. "
+      : "Zwracasz wyłącznie treść notatki, bez tematu i BEZ podpisu — odbiorca widzi Twój profil. To krótka notatka: dokładnie 3 zdania po maksymalnie 15 słów (konkret o odbiorcy · przedstawienie · korzyść zakończona pytaniem). ") +
+    "Bez cudzysłowów wokół treści." + await lessons(projectId);
   const user = `CO SPRZEDAJEMY (baza wiedzy):
 ${kb || "(brak)"}
 
 ODBIORCA:
 imię i nazwisko: ${lead.full_name || "NIEZNANE — nie wymyślaj imienia"}
-stanowisko: ${lead.title ?? lead.headline ?? "-"}
+stanowisko: ${lead.title || lead.headline || "-"}
 firma: ${lead.company ?? "-"}
 branża: ${lead.industry ?? "-"}
 lokalizacja: ${lead.location ?? "-"}
 strona: ${lead.website ?? "-"}
 dlaczego pasuje: ${lead.why ?? "-"}
-${cfg.tone.signature ? `\nPodpisz się: ${cfg.tone.signature}` : ""}`;
-  const text = await ask(projectId, "draft", system, user, 400);
-  return text ? text.slice(0, cfg.tone.max_chars + 120) : null;
+
+Zdanie przedstawienia (użyj dosłownie, jako drugie zdanie): ${intro}
+${channel === "email" ? `Podpisz się dokładnie tak: ${signature}` : "Bez podpisu."}`;
+  const raw = await ask(projectId, "draft", system, user, channel === "linkedin" ? 300 : 520);
+  if (!raw) return null;
+  let { subject, text } = splitSubject(raw.replace(/^["„]+|["”]+$/g, ""));
+  // model 9B potrafi „zapomnieć" podpisu albo powitać jak strona WWW — pilnuje kod, nie nadzieja
+  text = text.replace(/^\s*Witaj(?:cie)?\s+(?:w\s+)?[^,\n!]{2,60}[,!]?\s*/i, "Dzień dobry,\n\n");
+  if (channel === "email" && !text.includes(signature.split(",")[0])) text = `${text.trim()}\n\n${signature}`;
+  if (channel === "linkedin") {
+    // notatka do zaproszenia: LinkedIn odrzuca dłuższe, a cięcie w pół zdania wygląda jak awaria —
+    // zdejmujemy podpis, jeśli model go dopisał, i tniemy na końcu ostatniego pełnego zdania
+    text = text.replace(new RegExp(`\\s*${signature.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`), "").trim();
+    if (text.length > LI_INVITE_MAX) {
+      // model 9B nie liczy znaków — zamiast ucinać (ginęło pytanie na końcu) prosimy o skrót
+      const shorter = await ask(
+        projectId,
+        "draft",
+        `Skracasz notatkę do zaproszenia LinkedIn do maksymalnie ${LI_INVITE_MAX - 20} znaków. Zostaw powitanie, zdanie „${intro}” bez zmian i pytanie na końcu; skróć albo usuń środek. Bez podpisu, bez cudzysłowów. Zwracasz tylko skrócony tekst.`,
+        text,
+        220,
+        0.2,
+      );
+      if (shorter && shorter.length <= LI_INVITE_MAX) {
+        let t = shorter.replace(/^["„]+|["”]+$/g, "").trim();
+        // skrót gubi pytanie na końcu — wracamy do pytania z pełnej wersji, jeśli się zmieści
+        if (!/\?\s*$/.test(t)) {
+          const q = (text.match(/[^.!?]*\?/g) ?? []).pop()?.trim() ?? "";
+          if (q && t.length + 1 + q.length <= LI_INVITE_MAX) t = `${t} ${q}`;
+          else if (t.length + 32 <= LI_INVITE_MAX) t = `${t} Porozmawiamy 15 minut w tym tygodniu?`;
+        }
+        text = t;
+      }
+    }
+    // notatka ma kończyć się pytaniem — model 9B co drugi raz kończy stwierdzeniem
+    if (!/\?\s*$/.test(text) && text.length + 38 <= LI_INVITE_MAX) text = `${text.trim()} Porozmawiamy 15 minut w tym tygodniu?`;
+    if (text.length > LI_INVITE_MAX) {
+      const cut = text.slice(0, LI_INVITE_MAX);
+      const end = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("? "), cut.lastIndexOf("! "), cut.lastIndexOf(".\n"));
+      text = end > 80 ? cut.slice(0, end + 1) : cut.replace(/\s+\S*$/, "");
+    }
+  }
+  return {
+    text: text.slice(0, maxChars + 160),
+    subject: channel === "email" ? subject || String(cfg.email.subject || "") || defaultSubject(lead) : "",
+    channel,
+  };
+}
+
+// Odpowiedź w toczącej się rozmowie — z LinkedIna (webhook) i z testowego czatu.
+async function replyMessage(projectId: string, cfg: Cfg, lead: Record<string, unknown>, convo: string) {
+  const channel = channelOf(lead);
+  const who = await senderIdentity(projectId, cfg, channel);
+  const kb = await knowledge(projectId, 4500);
+  return await ask(
+    projectId,
+    "reply",
+    `Jesteś ${who.name || "przedstawicielem"} z firmy ${who.company || "(firma z bazy wiedzy)"}. ` +
+      `Prowadzisz rozmowę sprzedażową po polsku, ${cfg.tone.form === "pan" ? "Pan/Pani" : "na Ty"}. ` +
+      "Odpowiadasz krótko (2-4 zdania), konkretnie, bez lania wody, na KAŻDE pytanie rozmówcy z ostatniej wiadomości. Celem jest umówienie krótkiej rozmowy — na końcu proponujesz konkret (np. 15 minut telefonicznie w tym tygodniu). " +
+      `Trzymasz formę ${cfg.tone.form === "pan" ? "Pan/Pani" : "na Ty"} konsekwentnie, niezależnie od tego, jak pisze rozmówca. ` +
+      "Nie witasz się i nie przedstawiasz ponownie — rozmowa już trwa. " +
+      "Jeśli rozmówca odmawia — dziękujesz i kończysz. Jeśli pyta o cenę, której nie ma w bazie wiedzy — mówisz, że wycena zależy od liczby osób i zakresu, i proponujesz rozmowę. " +
+      "Źródłem prawdy jest wyłącznie blok CO SPRZEDAJEMY: jeśli wcześniej w rozmowie padło coś, czego tam już nie ma (oferta mogła się zmienić), mówisz wprost, że oferta została zaktualizowana, i podajesz stan aktualny. " +
+      "Bez markdown i emoji. Zwracasz wyłącznie treść odpowiedzi." + await lessons(projectId),
+    `CO SPRZEDAJEMY:\n${kb}\n\nROZMOWA (MY = ${who.name || "my"}, ON = rozmówca):\n${convo}`,
+    360,
+  );
 }
 
 // ── limity dzienne i okno pracy ─────────────────────────────────────────────
@@ -742,23 +938,30 @@ async function projectEmail(projectId: string) {
   return legacy as Record<string, string>;
 }
 
-async function sendEmail(projectId: string, cfg: Cfg, lead: Record<string, unknown>, text: string) {
+async function sendEmail(projectId: string, cfg: Cfg, lead: Record<string, unknown>, text: string, subject = "") {
   const mail = await projectEmail(projectId);
   const key = String(mail.resend_key ?? "");
   const sender = mail.from_name && mail.from_email ? `${mail.from_name} <${mail.from_email}>` : String(mail.from_email ?? mail.from ?? "");
   const from = String(cfg.email.from || sender || "");
   if (!key || !from) throw new Error("kanał e-mail nieskonfigurowany — uzupełnij klucz Resend i adres nadawcy w Integracjach");
-  const to = String(lead.email ?? "");
-  if (!to) throw new Error("lead nie ma adresu e-mail");
+  const to = String(lead.email ?? "").trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(to)) throw new Error("lead nie ma poprawnego adresu e-mail");
+  // podpis ze wspólnego kanału projektu (stopka) — pod treścią, jeśli agent sam się nie podpisał tak samo
+  const footer = String(mail.signature ?? "").trim();
+  const body = footer && !text.includes(footer) ? `${text}\n\n${footer}` : text;
+  // odpowiedź klienta ma trafić do człowieka — reply_to z ustawień, pusty = nadawca
+  const replyTo = String(mail.reply_to ?? "").trim();
+  const payload: Record<string, unknown> = {
+    from,
+    to,
+    subject: (subject || cfg.email.subject || defaultSubject(lead)).trim(),
+    text: body,
+  };
+  if (replyTo) payload.reply_to = replyTo;
   const r = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      from,
-      to,
-      subject: cfg.email.subject || `Krótkie pytanie — ${lead.company ?? ""}`.trim(),
-      text,
-    }),
+    body: JSON.stringify(payload),
     signal: AbortSignal.timeout(20_000),
   });
   const data = await r.json().catch(() => ({}));
@@ -766,11 +969,16 @@ async function sendEmail(projectId: string, cfg: Cfg, lead: Record<string, unkno
   return { channel: "email", provider_msg_id: String(data?.id ?? ""), status: "sent" as const };
 }
 
-async function deliver(projectId: string, cfg: Cfg, lead: Record<string, unknown>, text: string) {
+async function deliver(projectId: string, cfg: Cfg, lead: Record<string, unknown>, text: string, subject = "") {
   if (lead.li_urn) return await sendLinkedIn(cfg, lead, text);
-  if (lead.email && cfg.email.enabled) return await sendEmail(projectId, cfg, lead, text);
+  if (lead.email && cfg.email.enabled) return await sendEmail(projectId, cfg, lead, text, subject);
+  if (lead.email) throw new Error("lead ma tylko e-mail, a wysyłka maili jest wyłączona (Integracje → E-mail)");
   throw new Error("lead nie ma kanału kontaktu (brak LinkedIna i maila)");
 }
+
+// Lead, do którego nie ma jak napisać, nie może stać w kolejce „do wysyłki" —
+// tick próbowałby trzy razy i oznaczał go jako błąd. Ląduje w „Do akceptacji".
+const reachable = (c: { li_urn?: string; email?: string }, cfg: Cfg) => !!(c.li_urn || (c.email && cfg.email.enabled));
 
 // ── uruchomienie wyszukiwania ───────────────────────────────────────────────
 async function runSearch(projectId: string, source: string, query: string, limit: number) {
@@ -821,8 +1029,9 @@ async function runSearch(projectId: string, source: string, query: string, limit
       return {
         project_id: projectId,
         source: c.source,
-        // próg decyduje: powyżej — do wysyłki, poniżej — do ręcznej akceptacji
-        status: score >= cfg.score_threshold ? "ready" : "review",
+        // próg decyduje: powyżej — do wysyłki, poniżej — do ręcznej akceptacji;
+        // bez kanału kontaktu zawsze do akceptacji (ktoś musi dopisać mail)
+        status: score >= cfg.score_threshold && reachable(c, cfg) ? "ready" : "review",
         full_name: c.full_name ?? "",
         headline: c.headline ?? "",
         company: c.company ?? "",
@@ -877,15 +1086,15 @@ async function tick() {
     for (const lead of leads) {
       if (Date.now() > deadline) break;
       try {
-        const text = await draftMessage(pid, cfg, kb, lead);
-        if (!text) throw new Error("model nie zwrócił treści");
-        const res = await deliver(pid, cfg, lead, text);
+        const draft = await draftMessage(pid, cfg, kb, lead);
+        if (!draft?.text) throw new Error("model nie zwrócił treści");
+        const res = await deliver(pid, cfg, lead, draft.text, draft.subject);
         await db.from("hand_messages").insert({
           lead_id: lead.id,
           project_id: pid,
           channel: res.channel,
           direction: "out",
-          content: text,
+          content: draft.subject && res.channel === "email" ? `Temat: ${draft.subject}\n\n${draft.text}` : draft.text,
           status: res.status,
           provider_msg_id: res.provider_msg_id || null,
         });
@@ -947,19 +1156,8 @@ async function handleInbound(payload: Record<string, unknown>) {
   const cfg = await loadCfg(lead.project_id);
   const { data: history } = await db
     .from("hand_messages").select("direction, content").eq("lead_id", lead.id).order("id").limit(20);
-  const kb = await knowledge(lead.project_id, 4000);
   const convo = (history ?? []).map((m) => `${m.direction === "out" ? "MY" : "ON"}: ${m.content}`).join("\n").slice(0, 4000);
-  const reply = await ask(
-    lead.project_id,
-    "reply",
-    `Prowadzisz rozmowę sprzedażową po polsku, ${cfg.tone.form === "pan" ? "Pan/Pani" : "na Ty"}. ` +
-      "Odpowiadasz krótko (2-4 zdania), konkretnie, bez lania wody. Celem jest umówienie krótkiej rozmowy. " +
-      "Jeśli rozmówca odmawia — dziękujesz i kończysz. " +
-      "Źródłem prawdy jest wyłącznie blok CO SPRZEDAJEMY: jeśli wcześniej w rozmowie padło coś, czego tam już nie ma (oferta mogła się zmienić), mówisz wprost, że oferta została zaktualizowana, i podajesz stan aktualny. " +
-      "Zwracasz wyłącznie treść odpowiedzi.",
-    `CO SPRZEDAJEMY:\n${kb}\n\nROZMOWA:\n${convo}`,
-    360,
-  );
+  const reply = await replyMessage(lead.project_id, cfg, lead, convo);
   if (!reply) return J({ ok: true, replied: false });
   try {
     const res = await sendLinkedIn(cfg, lead, reply);
@@ -1075,9 +1273,9 @@ serve(async (req) => {
         if (!lead) return J({ error: "nie znaleziono" }, 404);
         await assertProject(user, lead.project_id);
         const cfg = await loadCfg(lead.project_id);
-        const text = await draftMessage(lead.project_id, cfg, await knowledge(lead.project_id), lead);
-        if (!text) return J({ error: "Model nie odpowiedział — sprawdź dostawcę AI w panelu admina" }, 502);
-        return J({ text });
+        const draft = await draftMessage(lead.project_id, cfg, await knowledge(lead.project_id), lead);
+        if (!draft?.text) return J({ error: "Model nie odpowiedział — sprawdź dostawcę AI w panelu admina" }, 502);
+        return J({ text: draft.text, subject: draft.subject, channel: draft.channel });
       }
       case "message.send": {
         const id = String(body.lead_id ?? "");
@@ -1085,17 +1283,22 @@ serve(async (req) => {
         if (!lead) return J({ error: "nie znaleziono" }, 404);
         await assertProject(user, lead.project_id);
         const cfg = await loadCfg(lead.project_id);
-        const text = String(body.content ?? "").trim() ||
-          (await draftMessage(lead.project_id, cfg, await knowledge(lead.project_id), lead)) || "";
+        let text = String(body.content ?? "").trim();
+        let subject = String(body.subject ?? "").trim();
+        if (!text) {
+          const draft = await draftMessage(lead.project_id, cfg, await knowledge(lead.project_id), lead);
+          text = draft?.text ?? "";
+          subject = subject || draft?.subject || "";
+        }
         if (!text) return J({ error: "Brak treści do wysłania" }, 400);
         try {
-          const res = await deliver(lead.project_id, cfg, lead, text);
+          const res = await deliver(lead.project_id, cfg, lead, text, subject);
           await db.from("hand_messages").insert({
             lead_id: id,
             project_id: lead.project_id,
             channel: res.channel,
             direction: "out",
-            content: text,
+            content: subject && res.channel === "email" ? `Temat: ${subject}\n\n${text}` : text,
             status: res.status,
             provider_msg_id: res.provider_msg_id || null,
           });
@@ -1151,6 +1354,42 @@ serve(async (req) => {
         const pid = String(body.project_id ?? "");
         await assertProject(user, pid);
         return J({ integrations: await integrationsStatus(true) });
+      }
+      // Testowy czat: Ty grasz leada, agent pisze jak do prawdziwego. Nic nie
+      // trafia do hand_leads/hand_messages — tylko koszt modelu do fiq_ai_usage.
+      // Pierwsza wiadomość idzie tą samą funkcją co w autopilocie (draftMessage),
+      // odpowiedzi tą samą co webhook LinkedIna (replyMessage) — test = produkcja.
+      case "test.chat": {
+        const pid = String(body.project_id ?? "");
+        await assertProject(user, pid);
+        const cfg = await loadCfg(pid);
+        const channel = body.channel === "email" ? "email" : "linkedin";
+        const l = (body.lead ?? {}) as Record<string, unknown>;
+        const lead: Record<string, unknown> = {
+          full_name: String(l.full_name ?? "").slice(0, 120),
+          title: String(l.title ?? "").slice(0, 160),
+          company: String(l.company ?? "").slice(0, 160),
+          industry: String(l.industry ?? "").slice(0, 80),
+          location: String(l.location ?? "").slice(0, 120),
+          website: String(l.website ?? "").slice(0, 200),
+          why: String(l.why ?? "").slice(0, 300),
+          // kanał wynika z tego, czy lead „ma LinkedIn" — symulujemy to jednym znacznikiem
+          li_urn: channel === "linkedin" ? "test" : "",
+          email: channel === "email" ? "test@example.invalid" : "",
+        };
+        const history = (Array.isArray(body.messages) ? body.messages : [])
+          .slice(-16)
+          .filter((m: Record<string, unknown>) => (m.role === "user" || m.role === "assistant") && m.content)
+          .map((m: Record<string, unknown>) => ({ role: String(m.role), content: String(m.content).slice(0, 2500) }));
+        if (!history.length) {
+          const draft = await draftMessage(pid, cfg, await knowledge(pid), lead);
+          if (!draft?.text) return J({ error: "Model nie odpowiedział — sprawdź dostawcę AI w panelu admina" }, 502);
+          return J({ text: draft.text, subject: draft.subject, channel });
+        }
+        const convo = history.map((m: { role: string; content: string }) => `${m.role === "assistant" ? "MY" : "ON"}: ${m.content}`).join("\n").slice(0, 4000);
+        const reply = await replyMessage(pid, cfg, lead, convo);
+        if (!reply) return J({ error: "Model nie odpowiedział — sprawdź dostawcę AI w panelu admina" }, 502);
+        return J({ text: reply, channel });
       }
       // Ręczne uruchomienie kolejki — do testów i „wyślij teraz".
       case "tick.now": {

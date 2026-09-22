@@ -46,6 +46,8 @@ export default function Settings() {
   const tone = cfg.tone
   const setLim = (k, v) => setCfg({ ...cfg, limits: { ...lim, [k]: v } })
   const setTone = (k, v) => setCfg({ ...cfg, tone: { ...tone, [k]: v } })
+  const ident = cfg.identity ?? { name: '', company: '' }
+  const setIdent = (k, v) => setCfg({ ...cfg, identity: { ...ident, [k]: v } })
 
   return (
     <>
@@ -163,6 +165,36 @@ export default function Settings() {
 
         <div className="card" style={{ gridColumn: '1 / -1' }}>
           <div className="row" style={{ marginBottom: 10 }}>
+            <b>Jak agent się przedstawia</b>
+          </div>
+          <p className="muted" style={{ marginBottom: 12 }}>
+            Wiadomość bez „kto pisze" wygląda jak spam, a z wymyślonym nazwiskiem — jak oszustwo. Na <b>LinkedInie</b>{' '}
+            agent zawsze pisze jako właściciel podłączonego konta (to jego profil). W <b>e-mailu</b> podpisuje się osobą
+            wpisaną tutaj; puste = nazwa nadawcy skrzynki z Integracji.
+          </p>
+          <div className="fgrid">
+            <label className="f">
+              <span className="mono">Firma, którą się przedstawia</span>
+              <input value={ident.company} onChange={(e) => setIdent('company', e.target.value)} placeholder="Fastline Racing Academy" />
+            </label>
+            <label className="f">
+              <span className="mono">Osoba podpisująca e-maile</span>
+              <input value={ident.name} onChange={(e) => setIdent('name', e.target.value)} placeholder="Łukasz Kaźmierczak" />
+            </label>
+          </div>
+          <p className="chart-tip">
+            Agent przedstawia się jednym zdaniem: „Nazywam się {ident.name || '<osoba>'} i piszę z {ident.company || '<firma>'}." —
+            a w mailu podpisuje się tak samo (chyba że wpiszesz własny podpis niżej).
+          </p>
+          <div className="row" style={{ gap: 8, marginTop: 12 }}>
+            <button className="btn primary" onClick={() => save()} disabled={busy}>
+              <IcCheck /> {busy ? 'Zapisywanie…' : 'Zapisz'}
+            </button>
+          </div>
+        </div>
+
+        <div className="card" style={{ gridColumn: '1 / -1' }}>
+          <div className="row" style={{ marginBottom: 10 }}>
             <b>Ton pierwszej wiadomości</b>
           </div>
           <p className="muted" style={{ marginBottom: 12 }}>
@@ -202,8 +234,8 @@ export default function Settings() {
             />
           </label>
           <p className="chart-tip">
-            Zmienne: {'{imie}'}, {'{nazwisko}'}, {'{firma}'}, {'{miasto}'}, {'{branza}'}. Wypełniony szablon
-            wyłącza improwizację modelu — wysyłamy dokładnie ten tekst.
+            Zmienne: {'{imie}'}, {'{nazwisko}'}, {'{firma}'}, {'{miasto}'}, {'{branza}'}, {'{podpis}'}. Wypełniony szablon
+            wyłącza improwizację modelu — wysyłamy dokładnie ten tekst. Sprawdzisz efekt w zakładce „Test rozmowy".
           </p>
           <div className="row" style={{ gap: 8, marginTop: 12 }}>
             <button className="btn primary" onClick={() => save()} disabled={busy}>

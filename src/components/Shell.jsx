@@ -19,6 +19,7 @@ import {
   IcChevL,
   IcChevR,
   IcGlobe,
+  IcSpark,
 } from '../shared/Icons.jsx'
 import { SkelPage } from '../shared/Skeleton.jsx'
 
@@ -26,6 +27,7 @@ const Dashboard = lazy(() => import('../pages/Dashboard.jsx'))
 const Search = lazy(() => import('../pages/Search.jsx'))
 const Leads = lazy(() => import('../pages/Leads.jsx'))
 const Chats = lazy(() => import('../pages/Chats.jsx'))
+const TestChat = lazy(() => import('../pages/TestChat.jsx'))
 const Knowledge = lazy(() => import('../pages/Knowledge.jsx'))
 const Integrations = lazy(() => import('../pages/Integrations.jsx'))
 const Settings = lazy(() => import('../pages/Settings.jsx'))
@@ -73,6 +75,7 @@ export default function Shell() {
       import('../pages/Search.jsx')
       import('../pages/Leads.jsx')
       import('../pages/Chats.jsx')
+      import('../pages/TestChat.jsx')
     })
     // Dane sekcji podgrzewamy PO KOLEI i z opóźnieniem (jak w Brain): salwa
     // równoległych żądań na wolnym łączu opóźniała dane otwartej strony.
@@ -111,6 +114,7 @@ export default function Shell() {
     { to: '/app/search', label: 'Wyszukiwanie', icon: <IcSearch /> },
     { to: '/app/leads', label: 'Leady', icon: <IcTarget /> },
     { to: '/app/chats', label: 'Rozmowy', icon: <IcChat /> },
+    { to: '/app/test', label: 'Test rozmowy', icon: <IcSpark /> },
     { to: '/app/knowledge', label: 'Baza wiedzy', icon: <IcBook /> },
   ]
 
@@ -185,6 +189,7 @@ export default function Shell() {
             <Route path="search" element={<Search />} />
             <Route path="leads" element={<Leads />} />
             <Route path="chats" element={<Chats />} />
+            <Route path="test" element={<TestChat />} />
             <Route path="knowledge" element={<Knowledge />} />
             <Route path="integrations" element={<Integrations />} />
             <Route path="settings" element={<Settings />} />
