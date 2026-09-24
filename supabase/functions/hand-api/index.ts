@@ -1359,17 +1359,19 @@ async function campaignsRun() {
 // Wspólna dla crona (autopilot), przycisku „Wyślij do nowych" i wysyłki zaraz po wyszukiwaniu.
 // ⚠️ Bez filtra po score: lead zaakceptowany ręcznie spod progu też ma status ready i MA wyjść —
 // stary tick filtrował `score >= próg`, więc ręczna akceptacja nic nie dawała.
-async function sendBatch(pid: string, cfg: Cfg, max: number, deadline: number): Promise<{ sent: number; failed: number; left: number }> {
+type SendItem = { name: string; channel: string; ok: boolean; error?: string };
+async function sendBatch(pid: string, cfg: Cfg, max: number, deadline: number): Promise<{ sent: number; failed: number; left: number; results: SendItem[] }> {
+  const results: SendItem[] = [];
   const outToday = await sentToday(pid);
   const room = Math.max(0, cfg.limits.messages_per_day - outToday);
   const take = Math.min(room, max);
   const { count: readyCount } = await db.from("hand_leads").select("id", { count: "exact", head: true }).eq("project_id", pid).eq("status", "ready");
-  if (take <= 0) return { sent: 0, failed: 0, left: readyCount ?? 0 };
+  if (take <= 0) return { sent: 0, failed: 0, left: readyCount ?? 0, results };
   const { data: leads } = await db
     .from("hand_leads").select("*").eq("project_id", pid).eq("status", "ready")
     .or(`next_at.is.null,next_at.lte.${new Date().toISOString()}`)
     .order("score", { ascending: false }).limit(take);
-  if (!leads?.length) return { sent: 0, failed: 0, left: readyCount ?? 0 };
+  if (!leads?.length) return { sent: 0, failed: 0, left: readyCount ?? 0, results };
   const kb = await knowledge(pid);
   let sent = 0, failed = 0;
   for (const lead of leads) {
@@ -1394,8 +1396,10 @@ async function sendBatch(pid: string, cfg: Cfg, max: number, deadline: number): 
         updated_at: new Date().toISOString(),
       }).eq("id", lead.id);
       sent++;
+      results.push({ name: String(lead.full_name || lead.company || "lead"), channel: res.channel, ok: true });
     } catch (e) {
       failed++;
+      results.push({ name: String(lead.full_name || lead.company || "lead"), channel: channelOf(lead), ok: false, error: String((e as Error).message ?? e).slice(0, 160) });
       // nie blokujemy kolejki jednym leadem — odkładamy go i lecimy dalej
       await db.from("hand_leads").update({
         status: (lead.attempts ?? 0) >= 2 ? "failed" : "ready",
@@ -1407,7 +1411,7 @@ async function sendBatch(pid: string, cfg: Cfg, max: number, deadline: number): 
     }
   }
   const { count: after } = await db.from("hand_leads").select("id", { count: "exact", head: true }).eq("project_id", pid).eq("status", "ready");
-  return { sent, failed, left: after ?? 0 };
+  return { sent, failed, left: after ?? 0, results };
 }
 
 async function tick() {

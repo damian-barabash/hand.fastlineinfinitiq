@@ -23,7 +23,7 @@ import {
 } from '../shared/Icons.jsx'
 import { SkelPage } from '../shared/Skeleton.jsx'
 import UserBadge from '../shared/UserBadge.jsx'
-import { refreshMe } from '../shared/platform.js'
+import { refreshMe, installBusyUi } from '../shared/platform.js'
 
 const Dashboard = lazy(() => import('../pages/Dashboard.jsx'))
 const Search = lazy(() => import('../pages/Search.jsx'))
@@ -42,6 +42,7 @@ export default function Shell() {
   const user = session.user
   const [me, setMe] = useState(user)
   useEffect(() => {
+    installBusyUi()
     let alive = true
     refreshMe().then((u) => alive && u && setMe({ ...(session.user || {}), ...u }))
     return () => {

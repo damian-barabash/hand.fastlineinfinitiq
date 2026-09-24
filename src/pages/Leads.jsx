@@ -1,6 +1,6 @@
 // Leady: lista z oceną, powodem i akcjami. Tu podejmujesz decyzje o tych, których
 // agent sam nie zaczepi (wynik poniżej progu) i podglądasz treść przed wysyłką.
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { session, hand } from '../lib/api.js'
 import {
   IcTarget,
@@ -17,6 +17,7 @@ import {
   IcSpark,
 } from '../shared/Icons.jsx'
 import { SkelCard } from '../shared/Skeleton.jsx'
+import ProgressModal from '../shared/ProgressModal.jsx'
 
 const SRC_ICON = { linkedin: IcLinkedIn, maps: IcMap, web: IcGlobe }
 const STATUS = {
@@ -67,22 +68,43 @@ export default function Leads() {
     }
   }
 
-  // jedna partia do wszystkich gotowych, do których agent jeszcze nie pisał (do 10 na klik, w limicie dziennym)
+  // okno postępu: po jednym leadzie na żądanie, żeby widać było, kto właśnie dostaje wiadomość
+  const [prog, setProg] = useState(null) // {total, done, lines, running}
+  const cancelRef = useRef(false)
+
   async function sendNew() {
     if (!readyCount) return
-    if (!confirm(`Wysłać pierwszą wiadomość do ${Math.min(readyCount, 10)} gotowych leadów? Każda idzie tym kanałem, którym da się dotrzeć (LinkedIn albo e-mail).`)) return
-    setBusy('sendNew')
+    const total = Math.min(readyCount, 10)
+    if (!confirm(`Wysłać pierwszą wiadomość do ${total} gotowych leadów? Każda idzie tym kanałem, którym da się dotrzeć (LinkedIn albo e-mail).`)) return
+    cancelRef.current = false
     setErr('')
-    try {
-      const d = await hand('leads.sendNew', { project_id: proj.id })
-      setSendInfo(d)
-      await load()
-    } catch (e) {
-      setErr(e.message)
-    } finally {
-      setBusy('')
+    setSendInfo(null)
+    setProg({ total, done: 0, lines: [{ text: 'Zaczynam…' }], running: true })
+    let sent = 0, failed = 0, last = null
+    for (let i = 0; i < total; i++) {
+      if (cancelRef.current) break
+      try {
+        const d = await hand('leads.sendNew', { project_id: proj.id, max: 1 })
+        last = d
+        const r = d.results?.[0]
+        sent += d.sent
+        failed += d.failed
+        setProg((p) => ({
+          ...p,
+          done: i + 1,
+          lines: [...p.lines, r ? { text: `${r.name} · ${r.channel === 'linkedin' ? 'LinkedIn' : 'e-mail'}${r.ok ? '' : ` · ${r.error}`}`, ok: r.ok } : { text: 'Brak gotowych leadów albo limit dzienny wyczerpany', ok: false }],
+        }))
+        if (!r || !d.left) break
+      } catch (e) {
+        setProg((p) => ({ ...p, lines: [...p.lines, { text: e.message, ok: false }] }))
+        break
+      }
     }
+    setProg((p) => ({ ...p, running: false, lines: [...p.lines, { text: `Wysłano ${sent}${failed ? `, błędów ${failed}` : ''}.` }] }))
+    setSendInfo(last ? { ...last, sent, failed } : null)
+    await load()
   }
+
 
   const load = () =>
     hand('leads.list', { project_id: proj.id, status: status || undefined })
@@ -283,6 +305,17 @@ export default function Leads() {
         })}
       </div>
 
+      <ProgressModal
+        open={!!prog}
+        title="Wysyłka do nowych"
+        subtitle="Każdy lead: model pisze wiadomość, potem idzie LinkedIn albo e-mail."
+        done={prog?.done ?? 0}
+        total={prog?.total ?? 0}
+        lines={prog?.lines ?? []}
+        running={!!prog?.running}
+        onCancel={() => { cancelRef.current = true }}
+        onClose={() => setProg(null)}
+      />
       {open && (
         <div className="modal-bg" onClick={() => setOpen(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>

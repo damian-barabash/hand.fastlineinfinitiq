@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { session, hand } from '../lib/api.js'
 import { IcSearch, IcLinkedIn, IcMap, IcGlobe, IcCheck, IcRefresh, IcSpark, IcPlay, IcPause, IcTrash, IcPlus, IcClock } from '../shared/Icons.jsx'
 import { SkelPage } from '../shared/Skeleton.jsx'
+import ProgressModal from '../shared/ProgressModal.jsx'
 
 const SOURCES = [
   {
@@ -74,12 +75,16 @@ export default function Search() {
     }
   }
 
+  const [prog, setProg] = useState(null)
   async function run() {
     if (!query.trim()) return
     setBusy('run')
     setMsg(null)
+    const qs = query.split(/[\n;|,]/).map((q) => q.trim()).filter(Boolean)
+    setProg({ title: 'Szukam leadów', lines: [{ text: `${SOURCES.find((s) => s.key === source)?.label}: ${qs.length} ${qs.length === 1 ? 'zapytanie' : 'zapytania'}` }, { text: 'Pobieram wyniki, dociągam kontakty, kwalifikuję modelem…' }], running: true })
     try {
       const d = await hand('run.start', { project_id: proj.id, source, query: query.trim(), limit })
+      setProg((p) => ({ ...p, running: false, lines: [...p.lines, { text: `Znaleziono ${d.found}, dodano ${d.added} nowych${d.skipped ? `, pominięto ${d.skipped} znanych` : ''}${d.sent ? `, autopilot napisał do ${d.sent}` : ''}.`, ok: true }] }))
       setMsg({
         ok: true,
         text: `Znaleziono ${d.found}, dodano ${d.added} nowych` +
@@ -89,6 +94,7 @@ export default function Search() {
       loadRuns()
     } catch (e) {
       setMsg({ ok: false, text: e.message })
+      setProg((p) => (p ? { ...p, running: false, lines: [...p.lines, { text: e.message, ok: false }] } : p))
       loadRuns()
     } finally {
       setBusy('')
@@ -207,6 +213,7 @@ export default function Search() {
         </div>
       </div>
 
+      <ProgressModal open={!!prog} title={prog?.title} lines={prog?.lines ?? []} running={!!prog?.running} onClose={() => setProg(null)} />
       <div className="spacer" />
       <Campaigns projId={proj.id} ready={ready} onRun={loadRuns} />
 
@@ -333,16 +340,19 @@ function Campaigns({ projId, ready, onRun }) {
       setBusy('')
     }
   }
+  const [prog, setProg] = useState(null)
   async function runNow(c) {
     setBusy(c.id + 'run')
     setErr('')
+    setProg({ title: `Kampania: ${c.name || c.queries[0]}`, lines: [{ text: `${c.queries.length} ${c.queries.length === 1 ? 'zapytanie' : 'zapytań'}, do ${c.per_run} wyników` }, { text: 'Pobieram, kwalifikuję…' }], running: true })
     try {
       const d = await hand('campaign.run', { id: c.id })
-      setErr(d.error ? d.error : `Znaleziono ${d.found}, dodano ${d.added} nowych${d.sent ? `, autopilot od razu napisał do ${d.sent}` : ''}.`)
+      const txt = d.error ? d.error : `Znaleziono ${d.found}, dodano ${d.added} nowych${d.sent ? `, autopilot od razu napisał do ${d.sent}` : ''}.`
+      setProg((p) => ({ ...p, running: false, lines: [...p.lines, { text: txt, ok: !d.error }] }))
       await load()
       onRun?.()
     } catch (e) {
-      setErr(e.message)
+      setProg((p) => (p ? { ...p, running: false, lines: [...p.lines, { text: e.message, ok: false }] } : p))
     } finally {
       setBusy('')
     }
@@ -351,6 +361,7 @@ function Campaigns({ projId, ready, onRun }) {
   const srcLabel = (k) => SOURCES.find((s) => s.key === k)?.label ?? k
   return (
     <div className="card">
+      <ProgressModal open={!!prog} title={prog?.title} lines={prog?.lines ?? []} running={!!prog?.running} onClose={() => setProg(null)} />
       <div className="row" style={{ marginBottom: 10 }}>
         <IcClock style={{ width: 18, height: 18, color: 'var(--acid)' }} />
         <b>Kampanie — szukaj codziennie</b>
