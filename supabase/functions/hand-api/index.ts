@@ -322,17 +322,30 @@ function dropNav(text: string) {
   return start > 120 ? text.slice(start) : text;
 }
 
+// Ta sama baza wiedzy i te same limity co u doradcy (brain-chat) i sprzedawcy (brain-sales):
+// silny model (DeepSeek) dostaje CAŁĄ bazę projektu + dzisiejszą datę (kalendarz terminów),
+// słaby (qwen 9B) — skrót jak dotąd.
+// Jak agent proponuje produkt (brain_products.offer_mode) — TA SAMA reguła w brain-chat, brain-sales i hand-api
+function offerModeLine(mode?: string | null): string {
+  if (mode === "main") return "  Rola w ofercie: GŁÓWNA OFERTA. To proponujesz w pierwszej kolejności, gdy klient jeszcze nie wie, czego szuka.";
+  if (mode === "on_request") return "  Rola w ofercie: TYLKO NA PYTANIE. Nie wspominasz o nim sam z siebie (ani w powitaniu, ani jako „mamy też…”, ani jako dodatek); mówisz o nim wyłącznie wtedy, gdy klient sam o niego pyta albo jego potrzeba wprost do niego prowadzi.";
+  return "";
+}
+
 async function knowledge(projectId: string, cap = 7000) {
+  const strong = !isWeakModel(await currentModel());
+  if (strong) cap = 60000;
   const { data: items } = await db
-    .from("brain_kb_items").select("type, title, content, url").eq("project_id", projectId).order("sort").limit(40);
+    .from("brain_kb_items").select("type, title, content, url").eq("project_id", projectId).order("sort").limit(80);
   const { data: prods } = await db
-    .from("brain_products").select("name, description, manual_notes, price, price_currency").eq("project_id", projectId).order("sort").limit(20);
+    .from("brain_products").select("name, description, manual_notes, price, price_currency, offer_mode").eq("project_id", projectId).order("sort").limit(60);
   const parts: string[] = [];
   // opis produktu jest już streszczeniem jego źródeł — idzie pierwszy i w całości
   for (const p of prods ?? []) {
     parts.push(
-      `[produkt] ${p.name}: ${String(p.description ?? "").slice(0, 1200)}${p.manual_notes ? ` | Od właściciela: ${String(p.manual_notes).slice(0, 400)}` : ""}` +
-        (p.price ? ` (od ${p.price} ${p.price_currency ?? "PLN"})` : ""),
+      `[produkt] ${p.name}: ${String(p.description ?? "").slice(0, strong ? 4000 : 1200)}${p.manual_notes ? ` | Od właściciela: ${String(p.manual_notes).slice(0, strong ? 3000 : 400)}` : ""}` +
+        (p.price ? ` (od ${p.price} ${p.price_currency ?? "PLN"})` : "") +
+        (offerModeLine(p.offer_mode) ? `\n${offerModeLine(p.offer_mode)}` : ""),
     );
   }
   const seen = new Set<string>();
@@ -344,9 +357,11 @@ async function knowledge(projectId: string, cap = 7000) {
     if (seen.has(key)) continue;
     seen.add(key);
     if (it.type === "url") body = dropNav(body);
-    parts.push(`[${it.type}] ${it.title ?? ""}: ${body.slice(0, 2200)}`);
+    parts.push(`[${it.type}] ${it.title ?? ""}: ${body.slice(0, strong ? 8000 : 2200)}`);
   }
-  return parts.join("\n").slice(0, cap);
+  // data na końcu (bez godziny) — stały prefiks bazy zostaje w cache przez całą dobę
+  const today = new Intl.DateTimeFormat("pl-PL", { timeZone: "Europe/Warsaw", weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(new Date());
+  return parts.join("\n").slice(0, cap) + `\nDZISIAJ jest ${today}. Terminy wcześniejsze niż dziś już minęły; proponujesz tylko przyszłe terminy z bazy. Przed odpowiedzią o terminach przejrzyj CAŁĄ listę z kalendarza i wymień KAŻDY termin, który pasuje do pytania (np. wszystkie w danym miesiącu), żadnego nie pomijając; liczba miejsc w kalendarzu to wielkość grupy, a nie wolne miejsca.`;
 }
 
 // ── wskazówki trenera (poprawki z testowego czatu) ───────────────────────────
@@ -882,6 +897,8 @@ function splitSubject(text: string) {
 // mimo reguły, więc pilnuje kod: zamiana na przecinek, bez podwójnych znaków.
 function noDashes(t: string): string {
   return t
+    // zakres liczb/godzin („10:00–14:00", „3–5 osób") to nie pauza — zostaje łącznik, a nie przecinek
+    .replace(/(\d)\s*[—–]\s*(?=\d)/g, "$1-")
     .replace(/\s*[—–]\s*/g, ", ")
     .replace(/,\s*,/g, ",")
     .replace(/([.!?:]),\s/g, "$1 ")
