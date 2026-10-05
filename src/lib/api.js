@@ -25,6 +25,8 @@ const READ_ACTIONS = new Set([
   'leads.list',
   'lead.messages',
   'stats',
+  // podgląd szablonu w trakcie pisania — nic nie zapisuje, więc bez paska „pracuję” i bez czyszczenia cache
+  'template.preview',
 ])
 
 export async function hand(action, payload = {}) {

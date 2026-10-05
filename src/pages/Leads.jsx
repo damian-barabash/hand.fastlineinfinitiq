@@ -46,6 +46,7 @@ export default function Leads() {
   const [open, setOpen] = useState(null)
   const [draft, setDraft] = useState(null)
   const [subject, setSubject] = useState('')
+  const [fromTpl, setFromTpl] = useState(false)
   const [channel, setChannel] = useState('')
   const [busy, setBusy] = useState('')
   const [err, setErr] = useState('')
@@ -149,6 +150,7 @@ export default function Leads() {
       const d = await hand('lead.draft', { id: lead.id })
       setDraft(d.text)
       setSubject(d.subject || '')
+      setFromTpl(!!d.template)
       setChannel(d.channel || '')
     } catch (e) {
       setErr(e.message)
@@ -325,7 +327,7 @@ export default function Leads() {
                 <IcX />
               </button>
             </div>
-            {draft === null && !err && <p className="muted">Model układa wiadomość…</p>}
+            {draft === null && !err && <p className="muted">Przygotowuję wiadomość…</p>}
             {draft !== null && (
               <>
                 {channel === 'email' && (
@@ -335,7 +337,9 @@ export default function Leads() {
                   </label>
                 )}
                 <label className="f">
-                  <span className="mono">Treść (możesz poprawić przed wysłaniem)</span>
+                  <span className="mono">
+                    {fromTpl ? 'Treść z Twojego szablonu (możesz poprawić przed wysłaniem)' : 'Treść (możesz poprawić przed wysłaniem)'}
+                  </span>
                   <textarea rows={7} value={draft} onChange={(e) => setDraft(e.target.value)} />
                 </label>
                 <div className="row" style={{ gap: 8 }}>

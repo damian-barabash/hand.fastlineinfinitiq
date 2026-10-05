@@ -72,7 +72,52 @@ input[type='range'] {
   accent-color: var(--acid);
   width: 100%;
 }
+/* gotowa pierwsza wiadomość: edytor szablonu obok podglądu */
+.fm-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: 22px;
+  align-items: start;
+}
+.fm-cap {
+  display: block;
+  font-size: 11px;
+  color: var(--dim);
+  margin: 10px 0 6px;
+}
+.fm-tags button,
+.fm-samples button {
+  text-transform: none;
+  letter-spacing: 0.02em;
+  font-size: 11.5px;
+}
+.fm-tags button {
+  color: var(--text);
+}
+.fm-tags button:hover {
+  border-color: var(--acid-line);
+  color: var(--acid);
+}
+.fm-preview {
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--acid);
+  background: var(--panel2);
+  padding: 14px 16px;
+  min-height: 150px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+.fm-subject {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11.5px;
+  color: var(--acid);
+  margin-bottom: 10px;
+}
 @media (max-width: 860px) {
+  .fm-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .chat-split {
     grid-template-columns: minmax(0, 1fr);
   }

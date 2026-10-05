@@ -60,6 +60,10 @@ const DEFAULT_CONFIG = {
   // intro_*: własne zdanie przedstawienia na kanał (puste = „Nazywam się X i piszę z Y.");
   // zmienne {imie} {firma}. Właściciel chce np. „Jestem kierowcą wyścigowym i prowadzę FRA".
   identity: { name: "", company: "", intro_linkedin: "", intro_email: "" },
+  // Gotowa pierwsza wiadomość właściciela: agent NIE zmienia treści, podstawia tylko tagi
+  // ({imie}, {firma}…). Osobno na kanał, bo notatka LinkedIn ma limit znaków, a mail ma temat.
+  // Pusty szablon kanału = na tym kanale pisze model.
+  first_message: { enabled: false, linkedin: "", email: "", subject: "" },
 };
 
 // Notatka do zaproszenia LinkedIn ma twardy limit u LinkedIna (300 znaków) —
@@ -76,6 +80,16 @@ function mergeCfg(stored: unknown): Cfg {
     out[k] = base && typeof base === "object" && !Array.isArray(base) && v && typeof v === "object"
       ? { ...(base as Record<string, unknown>), ...(v as Record<string, unknown>) }
       : v;
+  }
+  // stary układ: jeden „sztywny szablon" w tone.template → nowy, osobny na kanał
+  const tone = out.tone as Record<string, unknown>;
+  const fm = out.first_message as Record<string, unknown>;
+  const legacy = String(tone?.template ?? "").trim();
+  if (legacy) {
+    if (!String(fm?.linkedin ?? "").trim() && !String(fm?.email ?? "").trim()) {
+      out.first_message = { ...fm, enabled: true, linkedin: legacy, email: legacy };
+    }
+    out.tone = { ...tone, template: "" };
   }
   return out as Cfg;
 }
@@ -907,7 +921,97 @@ function noDashes(t: string): string {
     .replace(/,\s*$/, "");
 }
 
-type Draft = { text: string; subject: string; channel: "linkedin" | "email" };
+type Draft = { text: string; subject: string; channel: "linkedin" | "email"; template?: boolean; cut?: boolean };
+
+// ── gotowa pierwsza wiadomość (szablon właściciela) ─────────────────────────
+// Tag to {nazwa} albo {nazwa|tekst zastępczy}: zastępczy wchodzi, gdy o leadzie
+// tego nie wiemy (firma z Map nie ma imienia → „Cześć {imie|}," daje „Cześć,").
+const TPL_TAGS = ["imie", "nazwisko", "imie_nazwisko", "firma", "stanowisko", "miasto", "branza", "strona", "moje_imie", "moja_firma", "podpis"];
+const TPL_TAG_RE = /\{\s*([\p{L}_]+)\s*(?:\|([^{}]*))?\}/gu;
+// „{Imię}" i „{branża}" to te same tagi co {imie} i {branza} — ludzie piszą z ogonkami
+const tagKey = (k: string) => k.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/ł/g, "l");
+
+function unknownTags(tpl: string): string[] {
+  const bad = new Set<string>();
+  for (const m of String(tpl ?? "").matchAll(TPL_TAG_RE)) if (!TPL_TAGS.includes(tagKey(m[1]))) bad.add(`{${m[1]}}`);
+  return [...bad];
+}
+
+// Miasto z „Kraków, Woj. Małopolskie, Polska" (LinkedIn) i z „ul. X 5, 30-001 Kraków, Polska" (Mapy)
+function cityOf(location: unknown): string {
+  const loc = String(location ?? "").trim();
+  const zip = loc.match(/\d{2}-\d{3}\s+([^,]+)/);
+  if (zip) return zip[1].trim();
+  const first = loc.split(",")[0].trim();
+  return /\d/.test(first) ? "" : first;
+}
+
+function fillTemplate(tpl: string, vars: Record<string, string>): string {
+  const out = String(tpl ?? "").replace(/\r\n?/g, "\n").replace(TPL_TAG_RE, (all, k: string, fb?: string) => {
+    const key = tagKey(k);
+    if (!TPL_TAGS.includes(key)) return all;
+    return String(vars[key] ?? "").trim() || String(fb ?? "").trim();
+  });
+  // sprzątamy wyłącznie ślady po pustych tagach („Cześć ," → „Cześć,"); treści nie ruszamy
+  return out
+    .split("\n")
+    .map((l) => l.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+([,.;:!?])/g, "$1").replace(/[ \t]+$/g, ""))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function templateVars(lead: Record<string, unknown>, who: Identity, signature: string): Record<string, string> {
+  const full = String(lead.full_name ?? "").trim();
+  const parts = full.split(/\s+/).filter(Boolean);
+  return {
+    imie: parts[0] ?? "",
+    nazwisko: parts.slice(1).join(" "),
+    imie_nazwisko: full,
+    firma: String(lead.company ?? "").trim(),
+    stanowisko: String(lead.title ?? lead.headline ?? "").trim(),
+    miasto: cityOf(lead.location),
+    branza: String(lead.industry ?? "").trim(),
+    strona: String(lead.website ?? "").trim().replace(/^https?:\/\//i, "").replace(/\/$/, ""),
+    moje_imie: who.name,
+    moja_firma: who.company,
+    podpis: signature,
+  };
+}
+
+// Tekst dłuższy niż limit notatki LinkedIn tniemy na końcu ostatniego pełnego zdania —
+// ucięcie w pół słowa wygląda jak awaria.
+function cutAtSentence(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const end = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("? "), cut.lastIndexOf("! "), cut.lastIndexOf(".\n"), cut.lastIndexOf("?\n"), cut.lastIndexOf("!\n"));
+  return end > 80 ? cut.slice(0, end + 1) : cut.replace(/\s+\S*$/, "");
+}
+
+const templateFor = (cfg: Cfg, channel: "linkedin" | "email") => {
+  const fm = (cfg.first_message ?? {}) as Record<string, unknown>;
+  return fm.enabled ? String((channel === "linkedin" ? fm.linkedin : fm.email) ?? "").trim() : "";
+};
+
+function renderTemplate(cfg: Cfg, channel: "linkedin" | "email", lead: Record<string, unknown>, who: Identity, signature: string, tpl: string, subjectTpl?: string): Draft {
+  const vars = templateVars(lead, who, signature);
+  const full = fillTemplate(tpl, vars);
+  const text = channel === "linkedin" ? cutAtSentence(full, LI_INVITE_MAX) : full;
+  const fm = (cfg.first_message ?? {}) as Record<string, unknown>;
+  const subject = channel === "email"
+    ? fillTemplate(String(subjectTpl ?? fm.subject ?? ""), vars).replace(/\s*\n\s*/g, " ").slice(0, 160) || String(cfg.email.subject || "") || defaultSubject(lead)
+    : "";
+  return { text, subject, channel, template: true, cut: text.length < full.length };
+}
+
+// Zapis ustawień: nieznany tag poszedłby do klienta jako „{cos}", a za długa notatka byłaby cięta zawsze.
+function templateProblems(fm: Record<string, unknown>): string {
+  const bad = [...new Set([...unknownTags(String(fm.linkedin ?? "")), ...unknownTags(String(fm.email ?? "")), ...unknownTags(String(fm.subject ?? ""))])];
+  if (bad.length) return `Nieznany tag w szablonie: ${bad.join(", ")}. Dostępne: ${TPL_TAGS.map((t) => `{${t}}`).join(", ")}.`;
+  const bare = fillTemplate(String(fm.linkedin ?? ""), {});
+  if (bare.length > LI_INVITE_MAX) return `Szablon LinkedIn ma ${bare.length} znaków jeszcze przed wstawieniem danych odbiorcy, a notatka do zaproszenia mieści ${LI_INVITE_MAX}. Skróć go.`;
+  return "";
+}
 // model nie zawsze oddaje linię TEMAT — mail bez tematu nie może wyjść
 const defaultSubject = (lead: Record<string, unknown>) =>
   lead.company ? `Krótkie pytanie do ${String(lead.company).slice(0, 60)}` : "Krótkie pytanie";
@@ -923,17 +1027,9 @@ async function draftMessage(projectId: string, cfg: Cfg, kb: string, lead: Recor
     : who.name && who.company
     ? `Nazywam się ${who.name} i piszę z ${who.company}.`
     : who.company ? `Piszę z ${who.company}.` : "(nie przedstawiaj się z nazwiska, bo go nie znasz)");
-  if (cfg.tone.template) {
-    // sztywny szablon: tylko podstawienie zmiennych, zero improwizacji
-    const text = String(cfg.tone.template)
-      .replace(/\{imie\}/gi, String(lead.full_name ?? "").split(" ")[0] || "")
-      .replace(/\{nazwisko\}/gi, String(lead.full_name ?? "").split(" ").slice(1).join(" "))
-      .replace(/\{firma\}/gi, String(lead.company ?? ""))
-      .replace(/\{miasto\}/gi, String(lead.location ?? ""))
-      .replace(/\{branza\}/gi, String(lead.industry ?? ""))
-      .replace(/\{podpis\}/gi, signature);
-    return { text, subject: String(cfg.email.subject || ""), channel };
-  }
+  // gotowa wiadomość właściciela: tylko podstawienie tagów, zero modelu
+  const tpl = templateFor(cfg, channel);
+  if (tpl) return renderTemplate(cfg, channel, lead, who, signature, tpl);
   const form = cfg.tone.form === "pan" ? "formę grzecznościową (Pan/Pani)" : "formę bezpośrednią (na Ty)";
   const maxChars = channel === "linkedin" ? Math.min(cfg.tone.max_chars, LI_INVITE_MAX) : cfg.tone.max_chars;
   const L = await lessons(projectId);
@@ -1035,11 +1131,7 @@ ${channel === "email" ? `Podpisz się dokładnie tak: ${signature}` : "Bez podpi
     }
     // notatka ma kończyć się pytaniem — model 9B co drugi raz kończy stwierdzeniem
     if (!/\?\s*$/.test(text) && text.length + 38 <= LI_INVITE_MAX) text = `${text.trim()} Porozmawiamy 15 minut w tym tygodniu?`;
-    if (text.length > LI_INVITE_MAX) {
-      const cut = text.slice(0, LI_INVITE_MAX);
-      const end = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("? "), cut.lastIndexOf("! "), cut.lastIndexOf(".\n"));
-      text = end > 80 ? cut.slice(0, end + 1) : cut.replace(/\s+\S*$/, "");
-    }
+    text = cutAtSentence(text, LI_INVITE_MAX);
   }
   return {
     text: text.slice(0, maxChars + 160),
@@ -1536,6 +1628,8 @@ serve(async (req) => {
         const pid = String(body.project_id ?? "");
         await assertProject(user, pid);
         const incoming = mergeCfg(body.config);
+        const tplErr = templateProblems((incoming.first_message ?? {}) as Record<string, unknown>);
+        if (tplErr) return J({ error: tplErr }, 400);
         if (!admin) {
           // wybór konta LinkedIn zostaje po stronie admina
           const { data } = await db.from("hand_config").select("config").eq("project_id", pid).maybeSingle();
@@ -1705,7 +1799,33 @@ serve(async (req) => {
         const cfg = await loadCfg(lead.project_id);
         const draft = await draftMessage(lead.project_id, cfg, await knowledge(lead.project_id), lead);
         if (!draft?.text) return J({ error: "Model nie odpowiedział — sprawdź dostawcę AI w panelu admina" }, 502);
-        return J({ text: draft.text, subject: draft.subject, channel: draft.channel });
+        return J({ text: draft.text, subject: draft.subject, channel: draft.channel, template: !!draft.template });
+      }
+      // Podgląd szablonu pierwszej wiadomości w trakcie pisania (jeszcze przed zapisem):
+      // ta sama funkcja co przy wysyłce i prawdziwy nadawca z kanału — podgląd = produkcja.
+      case "template.preview": {
+        const pid = String(body.project_id ?? "");
+        await assertProject(user, pid);
+        const cfg = await loadCfg(pid);
+        const channel = body.channel === "email" ? "email" : "linkedin";
+        const tpl = String(body.template ?? "").slice(0, 6000);
+        const subjectTpl = String(body.subject ?? "").slice(0, 300);
+        const l = (body.lead ?? {}) as Record<string, unknown>;
+        const lead: Record<string, unknown> = {};
+        for (const k of ["full_name", "title", "company", "industry", "location", "website"]) lead[k] = String(l[k] ?? "").slice(0, 200);
+        const who = await senderIdentity(pid, cfg, channel);
+        const signature = cfg.tone.signature || [who.name, who.company].filter(Boolean).join(", ");
+        const d = renderTemplate(cfg, channel, lead, who, signature, tpl, subjectTpl);
+        const full = fillTemplate(tpl, templateVars(lead, who, signature));
+        return J({
+          text: d.text,
+          subject: tpl.trim() ? d.subject : "",
+          length: full.length,
+          limit: channel === "linkedin" ? LI_INVITE_MAX : 0,
+          cut: !!d.cut,
+          unknown: [...new Set([...unknownTags(tpl), ...unknownTags(subjectTpl)])],
+          sender: { name: who.name, company: who.company, signature },
+        });
       }
       case "message.send": {
         const id = String(body.lead_id ?? "");
@@ -1814,7 +1934,7 @@ serve(async (req) => {
         if (!history.length) {
           const draft = await draftMessage(pid, cfg, await knowledge(pid), lead);
           if (!draft?.text) return J({ error: "Model nie odpowiedział — sprawdź dostawcę AI w panelu admina" }, 502);
-          return J({ text: draft.text, subject: draft.subject, channel });
+          return J({ text: draft.text, subject: draft.subject, channel, template: !!draft.template });
         }
         const convo = history.map((m: { role: string; content: string }) => `${m.role === "assistant" ? "MY" : "ON"}: ${m.content}`).join("\n").slice(0, 4000);
         const reply = await replyMessage(pid, cfg, lead, convo);

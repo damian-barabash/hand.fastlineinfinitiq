@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { session, hand } from '../lib/api.js'
 import { IcCheck, IcPlay, IcPause, IcSpark } from '../shared/Icons.jsx'
 import { SkelPage } from '../shared/Skeleton.jsx'
+import FirstMessageCard from '../components/FirstMessageCard.jsx'
 
 const DAYS = [
   [1, 'Pn'],
@@ -212,13 +213,16 @@ export default function Settings() {
           </div>
         </div>
 
+        <FirstMessageCard cfg={cfg} setCfg={setCfg} save={save} busy={busy} msg={msg} projId={proj.id} />
+
         <div className="card" style={{ gridColumn: '1 / -1' }}>
           <div className="row" style={{ marginBottom: 10 }}>
-            <b>Ton pierwszej wiadomości</b>
+            <b>Ton wiadomości pisanych przez model</b>
           </div>
           <p className="muted" style={{ marginBottom: 12 }}>
             Treść agent układa z <b>bazy wiedzy projektu</b> — tej samej, z której korzysta Brain. Wybiera jedną
-            korzyść pasującą do branży leada i kończy krótkim pytaniem.
+            korzyść pasującą do branży leada i kończy krótkim pytaniem. Te ustawienia działają tam, gdzie nie ma
+            Twojego szablonu, oraz w odpowiedziach na wiadomości leadów.
           </p>
           <div className="fgrid">
             <label className="f">
@@ -243,19 +247,6 @@ export default function Settings() {
               <input value={tone.signature} onChange={(e) => setTone('signature', e.target.value)} placeholder="Damian, Fastline InfinitiQ" />
             </label>
           </div>
-          <label className="f">
-            <span className="mono">Sztywny szablon — zostaw puste, żeby pisał model</span>
-            <textarea
-              rows={3}
-              value={tone.template}
-              onChange={(e) => setTone('template', e.target.value)}
-              placeholder="Cześć {imie}, widzę że {firma} działa w {miasto}…"
-            />
-          </label>
-          <p className="chart-tip">
-            Zmienne: {'{imie}'}, {'{nazwisko}'}, {'{firma}'}, {'{miasto}'}, {'{branza}'}, {'{podpis}'}. Wypełniony szablon
-            wyłącza improwizację modelu — wysyłamy dokładnie ten tekst. Sprawdzisz efekt w zakładce „Test rozmowy".
-          </p>
           <div className="row" style={{ gap: 8, marginTop: 12 }}>
             <button className="btn primary" onClick={() => save()} disabled={busy}>
               <IcCheck /> {busy ? 'Zapisywanie…' : 'Zapisz ustawienia'}

@@ -95,7 +95,7 @@ export default function TestChat() {
     setErr('')
     try {
       const d = await hand('test.chat', { project_id: proj.id, channel, lead, messages: history(next) })
-      setMsgs([...next, { role: 'ai', content: d.text, subject: d.subject || '' }])
+      setMsgs([...next, { role: 'ai', content: d.text, subject: d.subject || '', template: !!d.template }])
     } catch (e) {
       setErr(e.message)
       setMsgs(next)
@@ -241,6 +241,7 @@ export default function TestChat() {
                 {m.role === 'ai' && (
                   <span className="mono" style={{ fontSize: 11, color: 'var(--dim)', marginTop: 3 }}>
                     {m.content.length} znaków
+                    {m.template && ' · z Twojego szablonu, bez udziału modelu'}
                     {channel === 'linkedin' && i === 0 && m.content.length > 280 && ' — za długo na notatkę LinkedIn'}
                   </span>
                 )}
