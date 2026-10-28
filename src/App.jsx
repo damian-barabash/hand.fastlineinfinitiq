@@ -1,14 +1,18 @@
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
-import { Suspense } from 'react'
+import { Suspense, lazy, useState } from 'react'
 import { session } from './shared/platform.js'
 import Login from './pages/Login.jsx'
 import Picker from './pages/Picker.jsx'
 import Shell from './components/Shell.jsx'
 import { Connect } from './shared/index.js'
+const ChangePassword = lazy(() => import('./shared/ChangePassword.jsx'))
 
 function Guard({ children, needProject }) {
   const loc = useLocation()
+  const [, bump] = useState(0)
   if (!session.token) return <Navigate to="/login" replace state={{ from: loc.pathname }} />
+  // konto z zakupu online: najpierw własne hasło (wspólne z Brain)
+  if (session.user?.must_change_password) return <ChangePassword onDone={() => bump((n) => n + 1)} />
   if (needProject && (!session.ws || !session.proj)) return <Navigate to="/" replace />
   return children
 }
@@ -36,6 +40,7 @@ export default function App() {
             </Guard>
           }
         />
+        <Route path="/platnosci" element={<Navigate to={`/app/platnosci${typeof location !== 'undefined' ? location.search : ''}`} replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Suspense>

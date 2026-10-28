@@ -33,6 +33,8 @@ const TestChat = lazy(() => import('../pages/TestChat.jsx'))
 const Knowledge = lazy(() => import('../pages/Knowledge.jsx'))
 const Integrations = lazy(() => import('../pages/Integrations.jsx'))
 const Settings = lazy(() => import('../pages/Settings.jsx'))
+const Payments = lazy(() => import('../shared/Payments.jsx'))
+import { IcCard } from '../shared/Icons.jsx'
 const AdminPanel = lazy(() => import('../pages/AdminPanel.jsx'))
 
 export default function Shell() {
@@ -167,6 +169,10 @@ export default function Shell() {
             <IcGlobe />
             {open && <span className="lbl">Integracje</span>}
           </NavLink>
+          <NavLink to="/app/platnosci" className={({ isActive }) => `sb-item ${isActive ? 'on' : ''}`} title="Płatności">
+            <IcCard />
+            {open && <span className="lbl">Płatności</span>}
+          </NavLink>
           <NavLink to="/app/settings" className={({ isActive }) => `sb-item ${isActive ? 'on' : ''}`} title="Ustawienia">
             <IcGear />
             {open && <span className="lbl">Ustawienia</span>}
@@ -208,6 +214,7 @@ export default function Shell() {
             <Route path="knowledge" element={<Knowledge />} />
             <Route path="integrations" element={<Integrations />} />
             <Route path="settings" element={<Settings />} />
+            <Route path="platnosci" element={<Payments />} />
             {user?.role === 'admin' && <Route path="admin" element={<AdminPanel />} />}
             <Route path="*" element={<Navigate to="dashboard" replace />} />
           </Routes>

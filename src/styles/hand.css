@@ -125,3 +125,14 @@ input[type='range'] {
     max-height: 260px;
   }
 }
+
+/* test rozmowy: dane leada | czat; na telefonie jedno pod drugim */
+.tc-grid {
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .tc-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

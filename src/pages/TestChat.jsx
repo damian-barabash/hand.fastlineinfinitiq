@@ -136,7 +136,7 @@ export default function TestChat() {
         delay="Zmiana działa od następnej wiadomości — Łowca czyta wskazówki przy każdym pisaniu."
       />
 
-      <div className="grid g2" style={{ gridTemplateColumns: 'minmax(260px, 340px) minmax(0, 1fr)', alignItems: 'start' }}>
+      <div className="grid tc-grid">
         <div className="card">
           <div className="row" style={{ marginBottom: 10 }}>
             <IcTarget style={{ width: 18, height: 18, color: 'var(--acid)' }} />
