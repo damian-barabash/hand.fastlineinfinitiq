@@ -6,6 +6,7 @@ import { session, hand } from '../lib/api.js'
 import { IcCheck, IcPlay, IcPause, IcSpark } from '../shared/Icons.jsx'
 import { SkelPage } from '../shared/Skeleton.jsx'
 import FirstMessageCard from '../components/FirstMessageCard.jsx'
+import Invoices from '../shared/Invoices.jsx'
 
 const DAYS = [
   [1, 'Pn'],
@@ -254,6 +255,10 @@ export default function Settings() {
             {msg && <span className={msg.ok ? 'muted' : 'err'}>{msg.text}</span>}
           </div>
         </div>
+      </div>
+      {/* faktury: klient — swoje, administrator — wszystkie faktury platformy */}
+      <div style={{ marginTop: 28 }}>
+        <Invoices />
       </div>
     </>
   )
